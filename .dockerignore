@@ -1,0 +1,18 @@
+venv/
+venv_visual/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+.env
+.env.example
+test_youtube_api.py
+verify_api.py
+add_video.py
+README_TESTING.md
+feedback_log.json
+
+# Exclude large video files to keep Docker image small
+temp_videos/
+*_CDN.mp4
+*.MOV

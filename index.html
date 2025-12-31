@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SceneIt - Find Any Movie Scene</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap"
+        rel="stylesheet">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <style>
+        * {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        body {
+            background: #000000;
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+
+        /* Animated gradient background */
+        .hero-gradient {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(ellipse at top, #1a0633 0%, #000000 50%);
+            z-index: -2;
+        }
+
+        .hero-gradient::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(circle at 80% 20%, rgba(168, 85, 247, 0.1) 0%, transparent 50%);
+            animation: pulseGlow 8s ease-in-out infinite;
+        }
+
+        @keyframes pulseGlow {
+
+            0%,
+            100% {
+                opacity: 0.3;
+            }
+
+            50% {
+                opacity: 0.6;
+            }
+        }
+
+        /* Glassmorphism */
+        .glass {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .glass-strong {
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(40px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(168, 85, 247, 0.5);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(168, 85, 247, 0.8);
+        }
+
+        /* Card hover effects */
+        .result-card {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            opacity: 0;
+        }
+
+        .result-card:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(168, 85, 247, 0.3);
+        }
+
+        .card-selected {
+            border-color: #a855f7 !important;
+            box-shadow: 0 0 40px rgba(168, 85, 247, 0.6);
+            transform: scale(1.05) !important;
+        }
+
+        .card-faded-out {
+            opacity: 0.2 !important;
+            transform: scale(0.95);
+            filter: grayscale(0.8);
+        }
+
+        /* Upload zone animation */
+        .upload-zone {
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-zone::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(45deg, transparent, rgba(168, 85, 247, 0.1), transparent);
+            transform: translateX(-100%);
+            transition: transform 0.6s;
+        }
+
+        .upload-zone:hover::before {
+            transform: translateX(100%);
+        }
+
+        .upload-zone:hover {
+            border-color: #a855f7;
+            background: rgba(168, 85, 247, 0.05);
+        }
+
+        /* Button glow */
+        .btn-primary {
+            background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
+            box-shadow: 0 4px 15px rgba(168, 85, 247, 0.4);
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            box-shadow: 0 8px 25px rgba(168, 85, 247, 0.6);
+            transform: translateY(-2px);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* Logo animation */
+        .logo-glow {
+            animation: logoGlow 3s ease-in-out infinite;
+        }
+
+        @keyframes logoGlow {
+
+            0%,
+            100% {
+                filter: drop-shadow(0 0 8px rgba(168, 85, 247, 0.5));
+            }
+
+            50% {
+                filter: drop-shadow(0 0 16px rgba(168, 85, 247, 0.8));
+            }
+        }
+
+        /* Browse tabs */
+        .browse-tab {
+            transition: all 0.2s ease;
+            border-radius: 999px;
+        }
+
+        .browse-tab.active {
+            background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%);
+            box-shadow: 0 4px 12px rgba(168, 85, 247, 0.4);
+        }
+
+        .browse-tab:not(.active):hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Responsive grid improvements */
+        /* Responsive grid improvements */
+        .results-grid {
+            display: grid;
+            /* Use auto-fill to fill the row, but enforce min-width */
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+            width: 100%;
+            /* Ensure it takes full width of parent */
+        }
+
+        /* Ensure card doesn't shrink below min size */
+        .result-card {
+            width: 100%;
+            min-width: 0;
+            /* Standard grid fix for overflows */
+        }
+
+        @media (min-width: 1536px) {
+            .results-grid {
+                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            }
+        }
+
+        /* Immersive Modal Background */
+        .modal-immersive-bg {
+            background-repeat: no-repeat;
+            background-size: cover;
+            background-position: center;
+        }
+
+        .modal-immersive-active #modal-background-overlay {
+            background: linear-gradient(to right, rgba(11, 12, 21, 0.7) 0%, rgba(11, 12, 21, 0.5) 40%, rgba(11, 12, 21, 0.3) 100%);
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Ambient Background (Deep Blue/Purple/Black Mix) -->
+    <div class="fixed inset-0 z-[-1] pointer-events-none">
+        <div class="absolute inset-0 bg-gradient-to-br from-[#0a0a12] via-[#1a1625] to-[#0f1016]"></div>
+        <div
+            class="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-purple-900/10 rounded-full blur-[120px] animate-pulse-slow">
+        </div>
+        <div
+            class="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-900/10 rounded-full blur-[120px] animate-pulse-slow animation-delay-2000">
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="container mx-auto px-4 py-8 relative z-10 min-h-screen flex flex-col">
+
+        <!-- Header -->
+        <header class="flex items-center justify-between mb-16 animate-fade-in-down">
+            <a href="/" class="flex items-center gap-4 cursor-pointer hover:opacity-80 transition-opacity">
+                <div
+                    class="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-600 to-blue-600 flex items-center justify-center shadow-lg shadow-purple-500/20">
+                    <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z">
+                        </path>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-3xl font-extrabold tracking-tight text-white mb-0.5"
+                        style="text-shadow: 0 0 30px rgba(139, 92, 246, 0.3);">
+                        Scene<span
+                            class="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-400">It</span>
+                    </h1>
+                    <p class="text-xs font-medium text-gray-400 tracking-wide uppercase">AI Video Search Engine</p>
+                </div>
+            </a>
+            <button id="explore-library-btn"
+                class="glass-button px-6 py-2.5 rounded-full text-sm font-semibold text-white/90 hover:text-white transition-all flex items-center gap-2 group">
+                <svg class="w-4 h-4 text-purple-400 group-hover:text-purple-300 transition-colors" fill="none"
+                    stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z">
+                    </path>
+                </svg>
+                Explore Library
+            </button>
+        </header>
+
+        <!-- Search Area -->
+        <main id="main-layout"
+            class="flex-1 max-w-7xl mx-auto w-full flex flex-col transition-all duration-700 ease-new-content">
+
+            <!-- Wrapper for Side-by-Side Transition -->
+            <div id="content-wrapper"
+                class="flex flex-col lg:flex-row items-start gap-8 w-full transition-all duration-700">
+
+                <!-- Left Column: Upload Box (Becomes Sticky) -->
+                <div id="upload-column"
+                    class="w-full lg:w-full transition-all duration-700 ease-in-out flex flex-col items-center sticky-transition">
+
+                    <div id="upload-container" class="w-full max-w-2xl transition-all duration-700 ease-out transform">
+
+                        <div id="hero-text" class="text-center mb-10 transition-all duration-500">
+                            <h2 class="text-5xl md:text-7xl font-bold text-white mb-6 tracking-tight leading-tight">
+                                Find any scene <br>
+                                <span
+                                    class="text-transparent bg-clip-text bg-gradient-to-r from-purple-300 via-blue-300 to-purple-300 animate-gradient-x">in
+                                    seconds.</span>
+                            </h2>
+                            <p class="text-lg text-gray-400 max-w-2xl mx-auto font-light">
+                                Upload a screenshot, image, or video snippet. Our AI model will instantly find the exact
+                                moment
+                                in your video library.
+                            </p>
+                        </div>
+
+                        <div id="drop-zone" class="relative group w-full mx-auto transition-all duration-700">
+                            <!-- Glow Effect -->
+                            <div
+                                class="absolute -inset-1 bg-gradient-to-r from-purple-600 via-blue-600 to-purple-600 rounded-3xl blur opacity-25 group-hover:opacity-50 transition duration-500 animate-gradient-xy">
+                            </div>
+
+                            <div
+                                class="relative bg-[#13131a]/80 backdrop-blur-xl border border-white/10 rounded-3xl p-2 transition-all shadow-2xl overflow-hidden min-h-[300px] flex flex-col">
+
+                                <!-- Inner Container -->
+                                <div
+                                    class="relative border-2 border-dashed border-white/10 rounded-2xl flex-1 flex flex-col items-center justify-center transition-colors group-hover:border-purple-500/30 group-hover:bg-white/5 cursor-pointer h-full">
+
+                                    <!-- Initial State -->
+                                    <div id="upload-prompt" class="text-center p-8 transition-opacity duration-300">
+                                        <div
+                                            class="w-20 h-20 bg-gradient-to-tr from-purple-500/20 to-blue-500/20 rounded-2xl flex items-center justify-center mx-auto mb-6 transform group-hover:scale-110 transition-transform duration-500">
+                                            <svg class="w-10 h-10 text-gray-200" fill="none" stroke="currentColor"
+                                                viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                                </path>
+                                            </svg>
+                                        </div>
+                                        <p class="text-xl font-medium text-white mb-2">Drop image or video here</p>
+                                        <p class="text-sm text-gray-500">or click to browse</p>
+                                    </div>
+
+                                    <!-- Preview State -->
+                                    <div id="preview-container"
+                                        class="absolute inset-0 hidden bg-[#0f0f13] z-10 flex items-center justify-center">
+                                        <img id="preview-img"
+                                            class="max-w-full max-h-full object-contain p-4 rounded-xl shadow-lg transition-all duration-500 hidden">
+                                        <video id="preview-video"
+                                            class="max-w-full max-h-full object-contain p-4 rounded-xl shadow-lg transition-all duration-500 hidden"
+                                            loop muted playsinline></video>
+                                        <button id="clear-file"
+                                            class="absolute top-4 right-4 bg-black/60 hover:bg-red-500/80 text-white rounded-full p-2 transition-colors backdrop-blur-sm z-20">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M6 18L18 6M6 6l12 12"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+
+                                </div>
+
+                                <!-- Search Button -->
+                                <button id="search-button"
+                                    class="absolute bottom-6 right-6 left-6 md:left-auto md:w-auto bg-white text-black px-8 py-3 rounded-xl font-bold shadow-lg shadow-white/10 hover:shadow-white/20 hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed hidden z-20">
+                                    Search Library
+                                </button>
+                            </div>
+
+                        </div>
+
+                        <!-- Multimodal Text Input -->
+                        <div class="mt-4 relative group">
+                            <div
+                                class="absolute -inset-0.5 bg-gradient-to-r from-purple-600 to-blue-600 rounded-lg blur opacity-25 group-hover:opacity-50 transition duration-500">
+                            </div>
+                            <input type="text" id="text-query"
+                                placeholder="Optional: Describe details (e.g. 'wearing a hat')"
+                                class="relative w-full bg-[#13131a] border border-white/10 text-white px-4 py-3 rounded-lg focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 transition-all placeholder-gray-500 text-sm">
+                        </div>
+
+                        <!-- Actor Search Input -->
+                        <div class="mt-3 relative group">
+                            <div
+                                class="absolute -inset-0.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-lg blur opacity-15 group-hover:opacity-40 transition duration-500">
+                            </div>
+                            <div class="relative flex items-center">
+                                <svg class="absolute left-3 w-4 h-4 text-gray-500" fill="none" stroke="currentColor"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                </svg>
+                                <input type="text" id="actor-query"
+                                    placeholder="Optional: Search for actor (e.g. 'Tom Hanks')"
+                                    class="w-full bg-[#13131a] border border-white/10 text-white pl-10 pr-4 py-3 rounded-lg focus:outline-none focus:border-pink-500 focus:ring-1 focus:ring-pink-500 transition-all placeholder-gray-500 text-sm">
+                            </div>
+                        </div>
+
+                        <!-- Hidden Input -->
+                        <!-- Upload Section -->
+                        <form id="upload-form" class="mb-20">
+                            <div id="drop-overlay"
+                                class="fixed inset-0 bg-black/90 backdrop-blur-md z-50 hidden opacity-0 flex items-center justify-center transition-opacity duration-300">
+                                <div class="text-center">
+                                    <svg class="w-24 h-24 text-purple-400 mx-auto mb-6 animate-bounce" fill="none"
+                                        stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12">
+                                        </path>
+                                    </svg>
+                                    <p class="text-3xl font-bold text-white">Drop your image or video here</p>
+                                </div>
+                            </div>
+                            <input type="file" id="upload-input" accept="image/*,video/*" class="hidden">
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Results (Hidden initially) -->
+            <div id="results-column" class="hidden w-full lg:w-3/4 flex-col opacity-0 transition-opacity duration-1000">
+
+                <!-- Loader -->
+                <div id="status-msg" class="hidden mb-8 w-full text-center">
+                    <div class="flex flex-col items-center gap-4">
+                        <div class="flex space-x-2">
+                            <div class="w-3 h-3 bg-blue-500 rounded-full animate-bounce"></div>
+                            <div class="w-3 h-3 bg-purple-500 rounded-full animate-bounce animation-delay-200">
+                            </div>
+                            <div class="w-3 h-3 bg-pink-500 rounded-full animate-bounce animation-delay-400">
+                            </div>
+                        </div>
+                        <p class="text-gray-400 text-sm font-medium animate-pulse">Scanning neural embeddings...</p>
+                    </div>
+                </div>
+
+                <!-- Results Container -->
+                <div id="results-container" class="w-full hidden">
+                    <!-- Results Grid -->
+                    <div id="results-grid" class="results-grid"></div>
+
+                    <!-- No Matches State -->
+                    <div id="no-matches-msg" class="hidden text-center py-20 animate-fade-in-up">
+                        <div class="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6">
+                            <svg class="w-10 h-10 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                            </svg>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white mb-2">No exact matches found</h3>
+                        <p class="text-gray-400 mb-8 max-w-md mx-auto">The scene couldn't be found in our current
+                            library. Try a different frame or explore what we have.</p>
+                    </div>
+                </div>
+            </div>
+
+    </div>
+
+    <!-- Browse Section (Optional, keep at bottom for now or move) -->
+    <div id="browse-section" class="w-full mt-16 hidden">
+        <div class="flex items-center justify-between mb-8">
+            <h2 class="text-2xl font-bold text-white flex items-center gap-3">
+                <span class="w-8 h-1 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full"></span>
+                Library
+            </h2>
+            <button id="close-browse" class="text-gray-400 hover:text-white transition-colors">Close</button>
+        </div>
+        <!-- Tabs -->
+        <div id="video-tabs" class="flex gap-3 overflow-x-auto pb-4 mb-8 scrollbar-thin"></div>
+
+        <!-- Browse Grid -->
+        <div id="browse-grid" class="results-grid"></div>
+        <div id="browse-loader" class="hidden text-center py-12">
+            <div class="inline-block w-12 h-12 border-4 border-gray-600 border-t-transparent rounded-full animate-spin">
+            </div>
+        </div>
+    </div>
+
+    </main>
+    </div>
+
+    <!-- Modal -->
+    <div id="modal"
+        class="fixed inset-0 bg-[#000000]/80 backdrop-blur-xl flex items-center justify-center z-[100] hidden opacity-0 transition-opacity duration-300 p-4 lg:p-10">
+
+        <!-- Modal Container (Dashboard Layout) with New Theme -->
+        <div id="modal-content-container"
+            class="flex flex-col w-full max-w-[95vw] lg:max-w-7xl h-[85vh] bg-[#0b0c15] rounded-3xl overflow-hidden shadow-2xl relative ring-1 ring-white/10 transition-all duration-500 bg-cover bg-center">
+
+            <!-- Dark Overlay for Readability -->
+            <div id="modal-background-overlay" class="absolute inset-0 transition-opacity duration-500 z-0"></div>
+
+            <!-- 1. HEADER: Title & Metadata -->
+            <div id="modal-header"
+                class="w-full bg-[#11121a]/30 backdrop-blur-md px-8 py-5 border-b border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center relative z-10">
+                <div class="space-y-1">
+                    <h2 id="modal-title"
+                        class="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-200 to-purple-200 leading-none tracking-tight">
+                    </h2>
+                    <div class="flex items-center gap-3 text-gray-400 text-sm font-medium">
+                        <span id="modal-year"
+                            class="px-2 py-0.5 border border-white/10 rounded bg-white/5 text-blue-300/80"></span>
+                        <div id="modal-streaming" class="flex gap-2 text-xs"></div>
+                    </div>
+                </div>
+
+                <!-- Close Button -->
+                <button id="modal-close"
+                    class="absolute top-5 right-5 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-full w-10 h-10 flex items-center justify-center transition-all">✕</button>
+            </div>
+
+            <!-- 2. MAIN CONTENT: Split View -->
+            <div class="flex flex-col-reverse md:flex-row flex-1 overflow-hidden relative">
+
+                <!-- LEFT SIDEBAR: Cast -->
+                <div
+                    class="w-full md:w-[280px] h-[200px] md:h-auto bg-[#0d0e14]/20 backdrop-blur-sm border-t md:border-t-0 md:border-r border-white/5 p-6 overflow-y-auto custom-scrollbar flex-shrink-0">
+                    <h3
+                        class="text-xs font-bold text-blue-400/80 uppercase tracking-widest mb-4 sticky top-0 bg-transparent py-2 z-10 shadow-sm">
+                        Cast</h3>
+                    <div id="modal-cast-grid" class="flex flex-col gap-3">
+                        <!-- Actor rows -->
+                    </div>
+                </div>
+
+                <!-- RIGHT: Video Player -->
+                <div
+                    class="flex-1 bg-black/10 backdrop-blur-sm relative flex flex-col items-center justify-center group video-container">
+                    <img id="modal-img" src="" class="max-w-full max-h-full object-contain">
+                    <video id="modal-video" class="w-full h-full object-contain hidden" playsinline></video>
+
+                    <!-- Loader -->
+                    <div id="video-loader"
+                        class="absolute inset-0 flex items-center justify-center pointer-events-none opacity-0 transition-opacity">
+                        <div class="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin">
+                        </div>
+                    </div>
+
+                    <!-- Controls Overlay -->
+                    <div id="custom-controls"
+                        class="absolute bottom-0 left-0 right-0 p-8 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <!-- Progress Bar -->
+                        <div
+                            class="h-1.5 bg-white/20 rounded-full mb-4 cursor-pointer relative group/progress overflow-hidden hover:h-2 transition-all">
+                            <div id="progress-fill"
+                                class="absolute top-0 left-0 h-full bg-gradient-to-r from-blue-500 to-purple-600 w-0 transition-all duration-100 ease-linear shadow-[0_0_15px_rgba(59,130,246,0.5)]">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <button id="play-pause-btn"
+                                class="text-white hover:text-blue-400 transition-colors transform hover:scale-110 active:scale-95">
+                                <svg class="w-8 h-8 fill-current" viewBox="0 0 24 24">
+                                    <path d="M8 5v14l11-7z" />
+                                </svg>
+                            </button>
+                            <div class="font-mono text-xs text-gray-300 bg-white/10 backdrop-blur px-2 py-1 rounded">
+                                <span id="clip-current-time">0:00</span> / <span id="clip-total-time">0:06</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. FOOTER: AI Description -->
+            <div
+                class="w-full bg-[#11121a]/40 backdrop-blur-md px-8 py-5 border-t border-white/5 min-h-[100px] flex flex-col justify-center relative z-20">
+                <div class="flex items-start gap-4 max-w-5xl mx-auto w-full">
+                    <div
+                        class="mt-1 w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-lg transform shrink-0">
+                        <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        </svg>
+                    </div>
+                    <div class="flex-1">
+                        <h3 class="text-xs font-bold text-blue-400/80 uppercase tracking-widest mb-1">
+                            AI Scene Analysis</h3>
+                        <p id="modal-caption" class="text-gray-200 text-lg font-light leading-relaxed">
+                            Initializing analysis...
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="/static/js/main.js?v=3"></script>
+</body>
+
+</html>

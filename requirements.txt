@@ -1,0 +1,19 @@
+transformers
+torch
+torchvision
+faiss-cpu
+pillow
+flask
+numpy<2
+opencv-python-headless<4.10
+requests
+pytest
+pytest-flask
+google-api-python-client
+yt-dlp
+python-dotenv
+
+# Face Detection (Optional - Large dependencies ~500MB)
+# Uncomment to enable actor recognition feature
+insightface
+onnxruntime
