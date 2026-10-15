@@ -23,9 +23,17 @@ class FaceDetector:
             return
 
         print("--- Loading InsightFace (buffalo_l) ---")
-        # On Mac M1/M2, CoreML or CPU is best. CUDA is not available.
-        # We'll stick to CPU for compatibility/reliability.
-        self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+        # Only detection and recognition are loaded. The buffalo_l pack ships
+        # five models totalling ~325 MB, but this pipeline uses exactly two:
+        #   det_10g.onnx    16 MB   face detection
+        #   w600k_r50.onnx 166 MB   ArcFace embeddings
+        # The rest -- 1k3d68 (137 MB, 3D landmarks), 2d106det, genderage -- were
+        # being loaded into memory on every startup and never used.
+        self.app = FaceAnalysis(
+            name='buffalo_l',
+            providers=['CPUExecutionProvider'],
+            allowed_modules=['detection', 'recognition'],
+        )
         self.app.prepare(ctx_id=0, det_size=(640, 640))
         self.known_faces = {} # name -> embedding (numpy array)
         print("--- Face Model Loaded ---")

@@ -66,24 +66,24 @@ def collect_faces(frame_paths, min_size):
 
 
 def cluster(records, distance):
-    """Agglomerative clustering with no preset number of identities."""
-    try:
-        from sklearn.cluster import AgglomerativeClustering
-    except ImportError:
-        print("scikit-learn unavailable; skipping clustering.")
-        return None
+    """Average-linkage agglomerative clustering on cosine distance.
+
+    Uses scipy rather than scikit-learn: scipy already comes in with
+    insightface, and this is the same algorithm. The number of identities is
+    not supplied -- a trailer's cast size is unknown in advance, which is the
+    case the video-face-clustering literature treats as the realistic one.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import pdist
 
     if len(records) < 2:
         return None
 
     matrix = np.vstack([r["embedding"] for r in records])
-    model = AgglomerativeClustering(
-        n_clusters=None,
-        distance_threshold=distance,
-        metric="cosine",
-        linkage="average",
-    )
-    return model.fit_predict(matrix)
+    # Embeddings are L2-normalised, so cosine distance is 1 - dot.
+    condensed = pdist(matrix, metric="cosine")
+    tree = linkage(condensed, method="average")
+    return fcluster(tree, t=distance, criterion="distance") - 1
 
 
 def write_montage(records, labels, out_dir, per_cluster=8):
@@ -120,6 +120,8 @@ def main():
     parser.add_argument("--distance", type=float, default=0.65,
                         help="cosine distance threshold for clustering")
     parser.add_argument("--out", default=".local-data/face_clusters")
+    parser.add_argument("--rescan", action="store_true",
+                        help="redetect instead of using the cache")
     args = parser.parse_args()
 
     frames = sorted(glob.glob(os.path.join(config.OUTPUT_DIR, "*.jpg")))
@@ -127,8 +129,21 @@ def main():
         print(f"No frames in {config.OUTPUT_DIR}. Run: python app.py --extract")
         return 1
 
-    print(f"Scanning {len(frames)} frames for faces (min size {args.min_size}px)...\n")
-    records = collect_faces(frames, args.min_size)
+    cache_path = os.path.join(".local-data", f"faces_min{args.min_size}.npz")
+    records = None
+    if os.path.exists(cache_path) and not args.rescan:
+        blob = np.load(cache_path, allow_pickle=True)
+        records = list(blob["records"])
+        print(f"Loaded {len(records)} cached faces from {cache_path} "
+              f"(use --rescan to redetect)\n")
+
+    if records is None:
+        print(f"Scanning {len(frames)} frames for faces (min size {args.min_size}px)...\n")
+        records = collect_faces(frames, args.min_size)
+        if records:
+            os.makedirs(".local-data", exist_ok=True)
+            np.savez(cache_path, records=np.array(records, dtype=object))
+            print(f"\ncached {len(records)} faces to {cache_path}")
     if not records:
         print("No faces detected.")
         return 0
