@@ -55,6 +55,12 @@ ingest = [
     "yt-dlp>=2024.3.10",
 ]
 
+# Captioning runs through the llama.cpp server binary, not a Python binding --
+# llama-cpp-python publishes no wheels and compiles from source. The Dockerfile
+# builds the upstream binary in a builder stage instead, so this group carries
+# no ML dependency at all.
+caption = []
+
 dev = [
     "pytest>=8.0",
     "pytest-flask>=1.3",

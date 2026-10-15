@@ -10,7 +10,7 @@ import sqlite3
 DB_PATH = os.getenv("DB_PATH", "sceneit.db")
 
 # Bumped whenever the schema changes in a way that needs migrating.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _ensure_columns(conn):
@@ -74,6 +74,9 @@ def _ensure_columns(conn):
         conn.execute("DROP TABLE frame_actors_v3")
 
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(frames)")}
+    for col in ("caption", "caption_model"):
+        if fcols and col not in fcols:
+            conn.execute(f"ALTER TABLE frames ADD COLUMN {col} TEXT")
     if fcols and "vector_id" not in fcols:
         conn.execute("ALTER TABLE frames ADD COLUMN vector_id INTEGER")
         # Backfilled from the old positional assumption, which is exactly what
@@ -136,6 +139,8 @@ def init_db(db_path=None):
             timestamp TEXT,
             time_sec REAL,
             vector_id INTEGER UNIQUE,
+            caption TEXT,              -- VLM description, generated at ingest
+            caption_model TEXT,        -- which model wrote it, for re-runs
             FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
         )
     """)

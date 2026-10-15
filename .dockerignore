@@ -1,18 +1,36 @@
+# Virtualenvs and caches
+.venv/
 venv/
 venv_visual/
 __pycache__/
 *.pyc
-.git/
-.DS_Store
-.env
-.env.example
-test_youtube_api.py
-verify_api.py
-add_video.py
-README_TESTING.md
-feedback_log.json
+.pytest_cache/
+.ruff_cache/
 
-# Exclude large video files to keep Docker image small
+# VCS and local scratch
+.git/
+.github/
+.local-data/
+.DS_Store
+
+# Secrets never enter the build context
+.env
+.env.*
+
+# Models are downloaded INSIDE the image by the `models` stage, never copied
+# from the host. Keeping them out of the context avoids shipping ~2.3 GB to the
+# daemon on every build.
+models/
+
+# Generated data: the image ships code, not someone's index.
+output_frames/
 temp_videos/
-*_CDN.mp4
-*.MOV
+media/
+*.db
+*.sqlite3
+feedback_log.json
+*.log
+
+# Tests and docs are not needed at runtime
+tests/
+DEPLOYMENT.md

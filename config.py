@@ -82,6 +82,31 @@ SCENE_LABELS = [
 ]
 SCENE_LABEL_MIN_CONFIDENCE = _env_float("SCENE_LABEL_MIN_CONFIDENCE", 0.3)
 
+# --- Captioning (Qwen3.5-2B via llama.cpp) ----------------------------------
+# Baked into the image rather than downloaded at runtime: a cold start should
+# never wait on a model fetch. GGUF + llama.cpp rather than safetensors +
+# transformers, because the latter would pull torch back into an image Phase 3
+# exists to remove -- 4.55 GB of fp16 weights plus ~550 MB of torch, versus
+# 1.28 GB (Q4_K_M) + 0.67 GB (vision projector) and no torch at all.
+MODEL_DIR = os.getenv("MODEL_DIR", "models")
+CAPTION_MODEL_PATH = os.getenv(
+    "CAPTION_MODEL_PATH", os.path.join(MODEL_DIR, "Qwen3.5-2B-Q4_K_M.gguf"))
+CAPTION_MMPROJ_PATH = os.getenv(
+    "CAPTION_MMPROJ_PATH", os.path.join(MODEL_DIR, "Qwen3.5-2B-mmproj-F16.gguf"))
+# The vision projector is what makes image input work; without it the model is
+# text-only and captioning silently degrades to describing nothing.
+CAPTION_SERVER_BIN = os.getenv("CAPTION_SERVER_BIN", "llama-server")
+CAPTION_SERVER_PORT = _env_int("CAPTION_SERVER_PORT", 8080)
+CAPTION_ENABLED = _env_flag("CAPTION_ENABLED", True)
+CAPTION_MAX_TOKENS = _env_int("CAPTION_MAX_TOKENS", 96)
+CAPTION_THREADS = _env_int("CAPTION_THREADS", 0)  # 0 = llama.cpp picks
+CAPTION_CONTEXT = _env_int("CAPTION_CONTEXT", 4096)
+CAPTION_PROMPT = os.getenv(
+    "CAPTION_PROMPT",
+    "Describe this film frame in one sentence. State what the people are doing, "
+    "not just what is present. Do not mention that it is a film or a frame.",
+)
+
 # --- External services ------------------------------------------------------
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
