@@ -59,12 +59,10 @@ dev = [
     "ruff>=0.3",
 ]
 
-[project.scripts]
-sceneit = "sceneit.cli:main"
-
 [tool.setuptools]
-# Phase 4 moves the code into a `sceneit/` package; until then the modules
-# live at the repo root and are imported directly.
+# The modules live at the repo root for now and are imported directly. Phase 4
+# moves them into a `sceneit/` package, at which point this grows a
+# [project.scripts] entry point for the `sceneit` CLI.
 py-modules = []
 
 [tool.pytest.ini_options]
