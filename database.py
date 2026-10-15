@@ -10,7 +10,7 @@ import sqlite3
 DB_PATH = os.getenv("DB_PATH", "sceneit.db")
 
 # Bumped whenever the schema changes in a way that needs migrating.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _ensure_columns(conn):
@@ -41,6 +41,37 @@ def _ensure_columns(conn):
             "(SELECT DISTINCT video_id FROM frames)"
         )
         conn.execute("UPDATE videos SET status = 'pending' WHERE status IS NULL")
+
+    acols = {r["name"] for r in conn.execute("PRAGMA table_info(actors)")}
+    if acols:
+        for col, decl in [("tmdb_id", "INTEGER"), ("profile_path", "TEXT"), ("source", "TEXT")]:
+            if col not in acols:
+                conn.execute(f"ALTER TABLE actors ADD COLUMN {col} {decl}")
+
+    facols = {r["name"] for r in conn.execute("PRAGMA table_info(frame_actors)")}
+    if facols and "confidence" not in facols:
+        # The old table was keyed (frame_id, actor_id) with no evidence columns,
+        # so it could not represent two faces in one frame. Rebuild it.
+        conn.execute("ALTER TABLE frame_actors RENAME TO frame_actors_v3")
+        conn.execute("""
+            CREATE TABLE frame_actors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                frame_id INTEGER NOT NULL,
+                actor_id INTEGER,
+                cluster_id INTEGER,
+                confidence REAL,
+                method TEXT,
+                bbox TEXT,
+                det_score REAL,
+                FOREIGN KEY(frame_id) REFERENCES frames(id) ON DELETE CASCADE,
+                FOREIGN KEY(actor_id) REFERENCES actors(id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO frame_actors (frame_id, actor_id, method) "
+            "SELECT frame_id, actor_id, 'legacy' FROM frame_actors_v3"
+        )
+        conn.execute("DROP TABLE frame_actors_v3")
 
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(frames)")}
     if fcols and "vector_id" not in fcols:
@@ -114,18 +145,30 @@ def init_db(db_path=None):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
             character TEXT,
-            image TEXT,
-            face_encoding BLOB
+            image TEXT,              -- servable URL, never a filesystem path
+            tmdb_id INTEGER,
+            profile_path TEXT,       -- TMDB portrait path, for refetching
+            face_encoding BLOB,      -- float32 reference embedding
+            source TEXT              -- 'tmdb' | 'manual' | 'discovered'
         )
     """)
 
+    # One row per DETECTED FACE, not per (frame, actor) pair. A frame can hold
+    # two faces of the same person, and we need to know where each one is and
+    # how confident the attribution was -- so the primary key is the face, and
+    # the evidence travels with it.
     c.execute("""
         CREATE TABLE IF NOT EXISTS frame_actors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             frame_id INTEGER NOT NULL,
-            actor_id INTEGER NOT NULL,
-            PRIMARY KEY (frame_id, actor_id),
+            actor_id INTEGER,            -- NULL = face found but not identified
+            cluster_id INTEGER,          -- identity group it belongs to
+            confidence REAL,             -- cosine similarity behind the call
+            method TEXT,                 -- 'cluster' | 'direct' | 'manual'
+            bbox TEXT,                   -- "x1,y1,x2,y2" within the frame
+            det_score REAL,
             FOREIGN KEY(frame_id) REFERENCES frames(id) ON DELETE CASCADE,
-            FOREIGN KEY(actor_id) REFERENCES actors(id) ON DELETE CASCADE
+            FOREIGN KEY(actor_id) REFERENCES actors(id) ON DELETE SET NULL
         )
     """)
 
@@ -138,6 +181,8 @@ def init_db(db_path=None):
     c.execute("CREATE INDEX IF NOT EXISTS idx_frames_video ON frames(video_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_frames_vector ON frames(vector_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_frame_actors_frame ON frame_actors(frame_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_frame_actors_actor ON frame_actors(actor_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_frame_actors_cluster ON frame_actors(cluster_id)")
 
     c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
