@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sceneit"
+version = "0.1.0"
+description = "Find the exact movie scene a screenshot came from."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+
+# --- Core runtime -----------------------------------------------------------
+# Python 3.14 is excluded deliberately: no wheels yet for the pinned
+# numpy / opencv line. 3.12 is the development target.
+dependencies = [
+    "flask>=3.0",
+    "numpy>=1.26,<2",
+    "opencv-python-headless>=4.9,<4.10",
+    "pillow>=10.2",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+
+# Search backend as it stands today (torch + transformers + faiss).
+# Phase 3 replaces this with `onnx` below; both are kept side by side so the
+# int8 ONNX descriptors can be validated against this fp32 baseline.
+torch-baseline = [
+    "torch>=2.2",
+    "transformers>=4.38",
+    "faiss-cpu>=1.8",
+]
+
+# Phase 3 target: one inference engine, no torch at runtime.
+onnx = [
+    "onnxruntime>=1.17",
+]
+
+# Actor recognition. A core product feature, not a nice-to-have — but kept as
+# a named group because insightface needs a compiler and is the single most
+# fragile install in the tree. Phase 3 calls the buffalo_l ONNX models through
+# onnxruntime directly and drops this wrapper (and its scikit-image / scipy /
+# scikit-learn / albumentations tail) entirely.
+faces = [
+    "insightface>=0.7.3",
+    "onnxruntime>=1.17",
+]
+
+# Library ingestion: YouTube discovery + download, TMDB metadata.
+ingest = [
+    "google-api-python-client>=2.120",
+    "yt-dlp>=2024.3.10",
+]
+
+dev = [
+    "pytest>=8.0",
+    "pytest-flask>=1.3",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+sceneit = "sceneit.cli:main"
+
+[tool.setuptools]
+# Phase 4 moves the code into a `sceneit/` package; until then the modules
+# live at the repo root and are imported directly.
+py-modules = []
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers --disable-warnings"
+testpaths = ["tests"]
+markers = [
+    "unit: unit tests for individual functions",
+    "integration: integration tests for complete workflows",
+    "api: API endpoint tests",
+    "slow: tests that need a model or a real index",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S"]
+ignore = [
+    "E501",  # line length is handled by the formatter
+    "S101",  # asserts are the point in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]

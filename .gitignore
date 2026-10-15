@@ -1,0 +1,53 @@
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Virtualenvs ---
+venv/
+venv_visual/
+.venv/
+ENV/
+
+# --- Model weights (never vendored; fetched at build/first run) ---
+models/
+*.pt
+*.pth
+*.onnx
+*.onnx_data
+*.bin
+*.safetensors
+
+# --- Generated data & indexes ---
+*.db
+*.sqlite3
+output_frames/
+temp_videos/
+frames.index
+metadata.json
+
+# --- Runtime user data (moves into SQLite in Phase 4) ---
+feedback_log.json
+
+# --- Logs ---
+*.log
+
+# --- OS / editors ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Local-only scratch (never committed) ---
+.local-data/
