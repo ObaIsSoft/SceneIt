@@ -16,6 +16,7 @@ from transformers import CLIPProcessor, CLIPModel, BlipProcessor, BlipForConditi
 from vector_index import VectorIndex
 
 import config
+import library
 
 
 def new_index():
@@ -51,11 +52,9 @@ def _feature_tensor(features):
     return getattr(features, "pooler_output", features)
 
 
-# Minimum cosine similarity for a result to count as a match. Expressed as
-# similarity so the number means something: 0.75 is "three-quarters aligned".
-MATCH_THRESHOLD = 0.75
-# Text fusion adds noise to the query vector, so accept slightly less.
-MATCH_THRESHOLD_MULTIMODAL = 0.68
+# Match floors live in config so they can be tuned without a code change.
+MATCH_THRESHOLD = config.MATCH_THRESHOLD
+MATCH_THRESHOLD_MULTIMODAL = config.MATCH_THRESHOLD_MULTIMODAL
 
 
 # --- Global State Wrapper ---
@@ -198,36 +197,13 @@ class SearchEngine:
                 final_output = f"Context: {title}\n\nAI Scene Detail: {caption}"
             
             return final_output
-            # Refined Replacements matching prompt output
-            if title:
-                replacements = {}
-                if title == "Sintel":
-                    replacements = {
-                        "a woman": "Sintel", "the woman": "Sintel", "a girl": "Sintel", 
-                        "a dragon": "Scales", "the dragon": "Scales", "a small dragon": "Scales"
-                    }
-                elif title == "TearsOfSteel":
-                    replacements = {
-                        "a man": "Thom", "the man": "Thom", 
-                        "a woman": "Celia", "the woman": "Celia",
-                        "a robot": "a giant robot"
-                    }
-                elif title == "BigBuckBunny":
-                    replacements = {
-                        "a rabbit": "Big Buck Bunny", "the rabbit": "Big Buck Bunny", "a big rabbit": "Big Buck Bunny",
-                         "a squirrel": "Frank", "three squirrels": "Frank and friends"
-                    }
-                elif title == "ElephantsDream":
-                     replacements = {"a man": "Emo", "two men": "Emo and Proog"}
 
-                for old, new in replacements.items():
-                    # Case insensitive replace? No, BLIP output is lowercase usually
-                    caption = caption.replace(old, new)
-            
-                    caption = caption.replace(old, new)
-            
-            self.caption_cache[image_path] = caption
-            return caption
+        # NOTE: ~30 lines of unreachable code sat here, after the return above.
+        # It substituted character names into captions with per-title tables --
+        # {"a woman": "Sintel"}, {"a man": "Thom"}, {"a rabbit": "Big Buck
+        # Bunny"} -- and also held the only write to self.caption_cache, which
+        # is why the cache never populated. It only ever covered the four
+        # hardcoded demo films and has been removed rather than revived.
 
         except Exception as e:
             print(f"Caption error: {e}")
@@ -259,10 +235,9 @@ class SearchEngine:
             filename = os.path.basename(image_path) # TearsOfSteel_123.jpg
             title_part = filename.rsplit('_', 1)[0]
             
-            # Iterate config to find match
-            for vid in config.VIDEOS_TO_PROCESS:
-                if vid['title'] == title_part:
-                    return vid
+            # Look the title up in the library rather than scanning a
+            # hardcoded Python list.
+            return library.get_source(title_part)
         except:
             pass
         return None
@@ -272,12 +247,9 @@ class SearchEngine:
         try:
             image = Image.open(image_path).convert('RGB')
             
-            # Scene categories (common in movies)
-            scenes = [
-                "outdoor scene", "indoor scene", "close-up shot", "wide shot",
-                "action sequence", "dramatic scene", "conversation", 
-                "dark scene", "bright scene", "cityscape", "nature scene"
-            ]
+            # Labels come from config (SCENE_LABELS env var), because they
+            # are content rather than logic.
+            scenes = config.SCENE_LABELS
             
             # Use existing CLIP model
             inputs = self.processor(
@@ -297,7 +269,7 @@ class SearchEngine:
             
             # Return description
             scene_type = scenes[top_idx]
-            if confidence > 0.3:
+            if confidence > config.SCENE_LABEL_MIN_CONFIDENCE:
                 return f"A {scene_type}"
             else:
                 return "Scene from video"
@@ -451,13 +423,75 @@ def validate_image(file_stream):
     except:
         return False
 
-def download_video_if_needed(url, dest_folder, dest_filename):
+def download_with_ytdlp(url, dest_path, max_height=720):
+    """Fetch a YouTube source with yt-dlp.
+
+    Needed because plain requests on a watch URL saves the HTML page as .mp4.
+    That is what the three configured trailers were doing: cv2 could not open
+    the result, so they contributed zero frames and failed silently.
+
+    Uses the Python API rather than the console script. shutil.which("yt-dlp")
+    only finds it when the virtualenv's bin is on PATH, which it is not when
+    invoking .venv/bin/python directly -- so the subprocess form reported
+    "yt-dlp not found" despite yt-dlp being installed.
+    """
+    fmt = (f"bestvideo[ext=mp4][height<={max_height}]+bestaudio[ext=m4a]/"
+           f"best[ext=mp4][height<={max_height}]/best")
+
+    try:
+        import yt_dlp
+    except ImportError:
+        print("  yt-dlp is not installed. Add it with: pip install -e '.[ingest]'")
+        return None
+
+    options = {
+        "format": fmt,
+        "merge_output_format": "mp4",
+        "outtmpl": dest_path,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 3,
+        "socket_timeout": 30,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        print(f"  yt-dlp failed: {str(e).strip().splitlines()[-1][:200]}")
+        return None
+
+    if os.path.exists(dest_path):
+        size_mb = os.path.getsize(dest_path) / 1e6
+        print(f"  downloaded {size_mb:.1f} MB")
+        return dest_path
+    # yt-dlp may append a container extension when it cannot honour outtmpl.
+    stem = os.path.splitext(dest_path)[0]
+    for candidate in (f"{stem}.mp4", f"{stem}.mkv", f"{stem}.webm"):
+        if os.path.exists(candidate):
+            os.replace(candidate, dest_path)
+            return dest_path
+    print("  yt-dlp reported success but produced no file")
+    return None
+
+
+def download_video_if_needed(url, dest_folder, dest_filename, source_type=None):
     os.makedirs(dest_folder, exist_ok=True)
     dest_path = os.path.join(dest_folder, dest_filename)
     if os.path.exists(dest_path):
         print(f"Video {dest_filename} exists locally.")
         return dest_path
+
+    if source_type is None:
+        source_type = library.classify_source(url)
+
+    if source_type == "local":
+        return dest_path if os.path.exists(dest_path) else None
+
     print(f"Downloading {url}...")
+    if source_type == "youtube":
+        return download_with_ytdlp(url, dest_path)
+
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         # verify=False was here, which disabled certificate validation on every
@@ -511,50 +545,59 @@ def run_extraction(videos=None):
     # We will build the index at the END, after we know the total count
     all_vectors = []
     engine.metadata_db = [] # Clear memory
-    # Defaults to the whole configured library; --only / --limit narrow it so a
-    # working index can be built in minutes instead of re-ingesting everything.
+    # Defaults to every source in the library; --only / --limit narrow it.
     if videos is None:
-        videos = config.VIDEOS_TO_PROCESS
+        videos = library.list_sources()
     if not videos:
-        print("No videos selected for extraction.")
+        print("The library is empty. Add a source first:")
+        print("    python app.py --add <url-or-path> --title 'Some Film'")
         return
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     
-    # Force fresh DB schema.
-    # Uses database.DB_PATH rather than a literal "sceneit.db": in production
-    # DB_PATH points at a mounted volume (/data/sceneit.db on Fly), so the old
-    # hardcoded path deleted nothing, init_db() ran CREATE TABLE IF NOT EXISTS
-    # over the live database, and extraction appended to it -- duplicating
-    # videos and desynchronising the index.
-    from database import DB_PATH, get_db_connection, init_db
-    if os.path.exists(DB_PATH):
-        print(f"Removing existing database at {DB_PATH}")
-        os.remove(DB_PATH)
+    # The database is the library now, so it must NOT be deleted here. The old
+    # code removed sceneit.db and repopulated `videos` from the hardcoded list
+    # on every run; doing that today would destroy the catalogue. It also
+    # removed a literal "sceneit.db" while DB_PATH may point at a mounted
+    # volume, so in production it deleted nothing and appended duplicates
+    # instead.
+    from database import get_db_connection, init_db, migrate
     init_db()
+    migrate()
     conn = get_db_connection()
 
-    # Populate Videos Table first
-    video_id_map = {}
-    for vid in videos:
-        metadata = {
-            "synopsis": vid.get("synopsis"),
-            "actors": vid.get("actors"),
-            "streaming_on": vid.get("streaming_on")
-        }
-        cur = conn.execute('''
-            INSERT INTO videos (title, filename, year, metadata_json)
-            VALUES (?, ?, ?, ?)
-        ''', (vid['title'], vid['filename'], vid['year'], json.dumps(metadata)))
-        video_id_map[vid['title']] = cur.lastrowid
+    # This rebuilds the whole index, so every vector is recomputed. Frames are
+    # therefore cleared wholesale to preserve the invariant that the index
+    # contains exactly the frames the database knows about. Sources not in this
+    # run return to 'pending' rather than being left claiming frames that no
+    # longer exist.
+    selected_ids = [v["id"] for v in videos]
+    placeholders = ",".join("?" * len(selected_ids))
+    dropped = conn.execute(
+        f"SELECT COUNT(*) FROM videos WHERE status = ? AND id NOT IN ({placeholders})",
+        [library.STATUS_INGESTED, *selected_ids],
+    ).fetchone()[0]
+    if dropped:
+        print(f"Note: {dropped} previously ingested source(s) are not in this run "
+              f"and will be reset to pending.")
+
+    conn.execute("DELETE FROM frame_actors")
+    conn.execute("DELETE FROM frames")
+    conn.execute(
+        f"UPDATE videos SET status = ?, ingested_at = NULL WHERE id NOT IN ({placeholders})",
+        [library.STATUS_PENDING, *selected_ids],
+    )
     conn.commit()
+
+    video_id_map = {v["title"]: v["id"] for v in videos}
 
     # Ensure AI model is loaded
     if engine.model is None: engine.load_ai_models()
     
     for video_info in videos:
         title = video_info["title"]
-        url = video_info["url"]
-        filename = video_info["filename"]
+        url = video_info.get("source_url") or ""
+        filename = video_info.get("filename") or library.safe_filename(title, url)
+        source_type = video_info.get("source_type") or library.classify_source(url)
         video_db_id = video_id_map[title]
 
         # 0. Face Recognition Setup
@@ -574,11 +617,13 @@ def run_extraction(videos=None):
             # Ensure actors exist in DB
             for actor in actors:
                 # Convert abs path to URL for DB (if local)
+                # Store a servable URL, never a filesystem path. Absolute
+                # paths used to reach the browser via /api/config and rendered
+                # as broken images while leaking the server layout.
                 img_path = actor.get('image')
                 db_image_url = img_path
-                if img_path and "actor_images" in img_path:
-                     basename = os.path.basename(img_path)
-                     db_image_url = f"/api/actor_image/{basename}"
+                if img_path and not str(img_path).startswith(('http://', 'https://', '/api/')):
+                     db_image_url = f"/api/actor_image/{os.path.basename(img_path)}"
 
                 conn.execute('''
                     INSERT OR REPLACE INTO actors (name, character, image) 
@@ -589,8 +634,10 @@ def run_extraction(videos=None):
         except Exception as e:
             print(f"Face detection setup failed: {e}")
         
-        video_path = download_video_if_needed(url, config.TEMP_VIDEO_DIR, filename)
-        if not video_path: continue
+        video_path = download_video_if_needed(url, config.TEMP_VIDEO_DIR, filename, source_type)
+        if not video_path:
+            library.mark_failed(video_db_id, f"could not fetch {url or filename}")
+            continue
         
         print(f"\n--- Extracting Vectors for: {title} ---")
         cap = cv2.VideoCapture(video_path)
@@ -660,6 +707,10 @@ def run_extraction(videos=None):
             
         cap.release()
         conn.commit() # Commit per video
+        if processed_count:
+            library.mark_ingested(video_db_id, duration_sec=frame_count / fps if fps else None)
+        else:
+            library.mark_failed(video_db_id, "no frames passed the brightness filter")
         print(f"Finished {title}: {processed_count} vectors extracted.")
 
     # --- Dynamic Index Building ---
@@ -704,13 +755,12 @@ def run_extraction(videos=None):
     print(f"\nSaving vector index to {config.INDEX_FILE}...")
     engine.index.save(config.INDEX_FILE)
     
-    print(f"Saving metadata to {config.METADATA_JSON} (No longer authoritative, DB is used)...")
-    # Optional: Keep writing JSON for debugging? Or delete?
-    # Let's delete or comment out to avoid confusion.
-    # with open(config.METADATA_JSON, 'w') as f:
-    #    json.dump(engine.metadata_db, f, indent=4)
-        
-    print("--- Extraction Complete ---")
+    # metadata.json is gone. It was a second, stale copy of what the database
+    # already holds -- the comment here read "No longer authoritative" while the
+    # code still printed about writing it, and add_video.py still appended to
+    # it. One source of truth.
+    conn.close()
+    print(f"--- Extraction Complete: {total_vectors} vectors ---")
 
 # --- Flask Routes ---
 
@@ -727,7 +777,7 @@ def serve_image(filename):
 
 @app.route('/api/actor_image/<path:filename>')
 def serve_actor_image(filename):
-    return send_from_directory('actor_images', filename)
+    return send_from_directory(config.ACTOR_IMAGE_DIR, filename)
 
 @app.route('/api/video/<path:filename>')
 def serve_video(filename):
@@ -768,9 +818,68 @@ def get_config():
     """
     Returns public configuration, specifically the list of available video titles.
     """
+    sources = [library.to_api_dict(v) for v in library.list_sources()]
     return jsonify({
-        "video_objects": config.VIDEOS_TO_PROCESS 
+        # Kept under the original key so the frontend contract is unchanged.
+        "video_objects": sources
     })
+
+@app.route('/api/library', methods=['GET'])
+def library_list():
+    """The catalogue. Replaces reading a hardcoded Python list."""
+    status = request.args.get('status')
+    sources = library.list_sources(status=status)
+    return jsonify({
+        "sources": [library.to_api_dict(v) for v in sources],
+        "counts": {
+            "total": len(sources),
+            "ingested": sum(1 for v in sources if v.get('status') == library.STATUS_INGESTED),
+            "pending": sum(1 for v in sources if v.get('status') == library.STATUS_PENDING),
+            "failed": sum(1 for v in sources if v.get('status') == library.STATUS_FAILED),
+        },
+    })
+
+
+@app.route('/api/library', methods=['POST'])
+def library_add():
+    """Register a source. Adding is cheap: nothing downloads until ingest."""
+    data = request.get_json(silent=True) or {}
+    source = (data.get('source') or data.get('url') or '').strip()
+    if not source:
+        return jsonify({"error": "a 'source' url or path is required"}), 400
+
+    try:
+        row, created = library.add_source(
+            source,
+            title=data.get('title'),
+            year=data.get('year'),
+            synopsis=data.get('synopsis'),
+            replace=bool(data.get('replace')),
+        )
+    except FileNotFoundError:
+        return jsonify({"error": f"no such file: {source}"}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "source": library.to_api_dict(row),
+        "created": created,
+        "note": None if created else "a source with this title already exists; pass replace=true to overwrite",
+    }), (201 if created else 200)
+
+
+@app.route('/api/library/<int:source_id>', methods=['DELETE'])
+def library_remove(source_id):
+    removed = library.remove_source(source_id)
+    if not removed:
+        return jsonify({"error": "not found"}), 404
+    # Its frames are gone by cascade, so their vectors are now orphaned.
+    return jsonify({
+        "removed": source_id,
+        "reindex_required": True,
+        "hint": "run: python app.py --extract",
+    })
+
 
 @app.route('/api/all_frames', methods=['GET'])
 def get_all_frames():
@@ -1026,81 +1135,129 @@ def explore():
 
 # --- Main ---
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="SceneIt server and ingest.")
+    parser = argparse.ArgumentParser(
+        description="SceneIt: manage the library, build the index, serve the app.",
+        epilog="The library lives in the database. Add sources, then extract.",
+    )
+    # Library management
+    parser.add_argument('--add', metavar='URL_OR_PATH', action='append', default=None,
+                        help="add a source to the library (repeatable)")
+    parser.add_argument('--title', default=None, help="title for --add")
+    parser.add_argument('--year', default=None, help="year for --add")
+    parser.add_argument('--remove', metavar='ID_OR_TITLE', default=None,
+                        help="remove a source from the library")
+    parser.add_argument('--list', action='store_true', help="list the library and exit")
+
+    # Indexing
     parser.add_argument('--extract', action='store_true',
-                        help="rebuild the index from the configured library")
+                        help="rebuild the index from the library")
     parser.add_argument('--only', action='append', metavar='TITLE', default=None,
-                        help="extract only this title (repeatable, substring match)")
+                        help="restrict extraction to matching titles (repeatable, substring)")
     parser.add_argument('--limit', type=int, default=None, metavar='N',
-                        help="extract at most N videos")
+                        help="extract at most N sources")
+    parser.add_argument('--pending', action='store_true',
+                        help="extract only sources not yet ingested")
+
+    # Serving
     parser.add_argument('--port', type=int, default=int(os.getenv('PORT', 5002)))
     parser.add_argument('--host', default='0.0.0.0')
-    parser.add_argument('--list', action='store_true',
-                        help="list the configured library and exit")
-    parser.add_argument('--video', metavar='URL_OR_PATH', default=None,
-                        help="extract one arbitrary source, ignoring the configured library")
-    parser.add_argument('--title', default=None, help="title for --video")
-    parser.add_argument('--year', default=None, help="year for --video")
     args = parser.parse_args()
 
+    from database import init_db, migrate
+    init_db()
+    migrate()
+
+    def print_library():
+        sources = library.list_sources()
+        if not sources:
+            print("  (library is empty)")
+            return
+        print(f"  {'ID':>3}  {'TITLE':<44} {'TYPE':<8} {'STATUS':<9} {'FRAMES':>6}")
+        for v in sources:
+            print(f"  {v['id']:>3}  {(v['title'] or '')[:44]:<44} "
+                  f"{(v['source_type'] or '?'):<8} {(v['status'] or '?'):<9} "
+                  f"{v.get('frame_count', 0):>6}")
+            if v.get('status') == library.STATUS_FAILED and v.get('error'):
+                print(f"       error: {v['error'][:90]}")
+
+    # --- Library management -------------------------------------------------
+    did_manage = False
+
+    if args.add:
+        did_manage = True
+        if args.title and len(args.add) > 1:
+            print("--title applies to a single --add; omit it to derive titles automatically.")
+            raise SystemExit(2)
+        for source in args.add:
+            try:
+                row, created = library.add_source(
+                    source, title=args.title, year=args.year, replace=False)
+            except FileNotFoundError:
+                print(f"  no such file: {source}")
+                raise SystemExit(1)
+            except ValueError as e:
+                print(f"  {e}")
+                raise SystemExit(1)
+            verb = "added" if created else "already present"
+            print(f"  {verb}: [{row['id']}] {row['title']}  ({row['source_type']})")
+
+    if args.remove:
+        did_manage = True
+        if library.remove_source(args.remove):
+            print(f"  removed: {args.remove}  (run --extract to rebuild the index)")
+        else:
+            print(f"  not found: {args.remove}")
+            raise SystemExit(1)
+
     if args.list:
-        for i, v in enumerate(config.VIDEOS_TO_PROCESS):
-            src = 'youtube' if 'youtube.com' in (v.get('url') or '') else ('local' if not v.get('url') else 'http')
-            print(f"  [{i:2}] {v['title']:<46} {src:<8} {v.get('filename')}")
+        print_library()
         raise SystemExit(0)
 
+    # --- Indexing -----------------------------------------------------------
     if args.extract:
-        selected = config.VIDEOS_TO_PROCESS
+        everything = library.list_sources()
+        if not everything:
+            print("The library is empty. Add a source first:")
+            print("    python app.py --add <url-or-path> --title 'Some Film'")
+            raise SystemExit(1)
 
-        # An explicit source bypasses the configured library entirely.
-        if args.video:
-            import re as _re
-            from urllib.parse import urlparse as _urlparse
-            is_url = args.video.startswith(('http://', 'https://'))
-            basename = os.path.basename(_urlparse(args.video).path) or 'video.mp4'
-            title = args.title or _re.sub(r'\.[^.]+$', '', basename) or 'Untitled'
-            if not is_url and not os.path.exists(args.video):
-                print(f"No such file: {args.video}")
-                raise SystemExit(1)
-            selected = [{
-                "title": title,
-                "url": args.video if is_url else "",
-                "filename": basename if is_url else os.path.basename(args.video),
-                "year": args.year or "",
-                "synopsis": "",
-                "actors": [],
-                "streaming_on": [],
-            }]
-            # A local path is used in place, not re-downloaded.
-            if not is_url:
-                os.makedirs(config.TEMP_VIDEO_DIR, exist_ok=True)
-                dest = os.path.join(config.TEMP_VIDEO_DIR, selected[0]["filename"])
-                if os.path.abspath(dest) != os.path.abspath(args.video):
-                    import shutil as _shutil
-                    _shutil.copy2(args.video, dest)
+        selected = everything
+        if args.pending:
+            selected = [v for v in selected if v.get('status') != library.STATUS_INGESTED]
         if args.only:
             wanted = [w.lower() for w in args.only]
             selected = [v for v in selected
-                        if any(w in v['title'].lower() for w in wanted)]
+                        if any(w in (v['title'] or '').lower() for w in wanted)]
             if not selected:
-                print(f"No configured title matches {args.only}. Use --list to see them.")
+                print(f"No title in the library matches {args.only}.")
+                print_library()
                 raise SystemExit(1)
         if args.limit is not None:
             selected = selected[:args.limit]
-        print(f"--- Extracting {len(selected)} of {len(config.VIDEOS_TO_PROCESS)} videos ---")
-        for v in selected:
-            print(f"      {v['title']}")
-        run_extraction(selected)
-    else:
-        if not os.path.exists(config.INDEX_FILE):
-            print(f"--- ERROR: no index at {config.INDEX_FILE}. Build one first:")
-            print("        python app.py --extract --only ForBiggerBlazes   (quick)")
-            print("        python app.py --extract                          (full library)")
-            raise SystemExit(1)
+        if not selected:
+            print("Nothing to extract.")
+            raise SystemExit(0)
 
-        # Load models & DB on startup
-        engine.load_ai_models()
-        engine.load_database()
-        engine.load_feedback_database()
-        print(f"--- Server listening on http://{args.host}:{args.port} ---")
-        app.run(host=args.host, port=args.port, debug=False)
+        print(f"--- Extracting {len(selected)} of {len(everything)} source(s) ---")
+        for v in selected:
+            print(f"      [{v['id']}] {v['title']}")
+        run_extraction(selected)
+        raise SystemExit(0)
+
+    if did_manage:
+        print()
+        print_library()
+        raise SystemExit(0)
+
+    # --- Serving ------------------------------------------------------------
+    if not os.path.exists(config.INDEX_FILE):
+        print(f"--- ERROR: no index at {config.INDEX_FILE}.")
+        print("    1. add a source:  python app.py --add <url> --title 'Some Film'")
+        print("    2. build it:      python app.py --extract")
+        raise SystemExit(1)
+
+    engine.load_ai_models()
+    engine.load_database()
+    engine.load_feedback_database()
+    print(f"--- Server listening on http://{args.host}:{args.port} ---")
+    app.run(host=args.host, port=args.port, debug=False)

@@ -9,9 +9,11 @@ async function loadConfig() {
         VIDEO_TITLES = data.video_objects;
         console.log("Loaded video config:", VIDEO_TITLES);
     } catch (err) {
-        console.error("Failed to load config:", err);
-        // Fallback
-        VIDEO_TITLES = [{ title: "BigBuckBunny", filename: "BigBuckBunny_CDN.mp4" }]; // Simplified fallback
+        console.error("Failed to load library:", err);
+        // No fallback. This used to hardcode a demo film, so a failed fetch
+        // silently presented a library that did not exist -- cards rendered,
+        // then every image and video 404'd. An empty list is honest.
+        VIDEO_TITLES = [];
     }
 }
 loadConfig();

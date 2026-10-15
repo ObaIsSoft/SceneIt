@@ -152,3 +152,71 @@ class TestEngineState:
         assert engine.feedback_db == {}
         assert engine.vector_map == {}
         assert engine.metadata_db == []
+
+
+class TestLibraryEndpoints:
+    """The catalogue is data served from the database, not a Python literal."""
+
+    def test_empty_library(self, client):
+        body = client.get("/api/library").get_json()
+        assert body["sources"] == []
+        assert body["counts"]["total"] == 0
+
+    def test_add_then_appears_in_config_and_library(self, client):
+        r = client.post("/api/library", json={
+            "source": "https://www.youtube.com/watch?v=abc123",
+            "title": "Some Film",
+            "year": "2024",
+        })
+        assert r.status_code == 201
+        created = r.get_json()
+        assert created["created"] is True
+        assert created["source"]["title"] == "Some Film"
+
+        listed = client.get("/api/library").get_json()
+        assert listed["counts"]["total"] == 1
+        assert listed["counts"]["pending"] == 1
+
+        # /api/config serves the same catalogue under its original key.
+        cfg = client.get("/api/config").get_json()
+        assert [v["title"] for v in cfg["video_objects"]] == ["Some Film"]
+
+    def test_source_is_required(self, client):
+        r = client.post("/api/library", json={"title": "No Source"})
+        assert r.status_code == 400
+        assert "error" in r.get_json()
+
+    def test_missing_local_path_is_a_400(self, client):
+        r = client.post("/api/library", json={"source": "/no/such/file.mp4"})
+        assert r.status_code == 400
+
+    def test_duplicate_title_is_reported_not_duplicated(self, client):
+        payload = {"source": "https://e.com/a.mp4", "title": "Dup"}
+        assert client.post("/api/library", json=payload).status_code == 201
+        second = client.post("/api/library", json=payload)
+        assert second.status_code == 200
+        assert second.get_json()["created"] is False
+        assert client.get("/api/library").get_json()["counts"]["total"] == 1
+
+    def test_delete(self, client):
+        source_id = client.post("/api/library", json={
+            "source": "https://e.com/a.mp4", "title": "Doomed",
+        }).get_json()["source"]["id"]
+
+        r = client.delete(f"/api/library/{source_id}")
+        assert r.status_code == 200
+        assert r.get_json()["reindex_required"] is True
+        assert client.get("/api/library").get_json()["counts"]["total"] == 0
+
+    def test_delete_missing(self, client):
+        assert client.delete("/api/library/4242").status_code == 404
+
+    def test_config_never_leaks_filesystem_paths(self, client, tmp_path):
+        """Absolute actor-image paths used to reach the browser through here."""
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"\x00")
+        client.post("/api/library", json={"source": str(clip), "title": "Local"})
+
+        raw = client.get("/api/config").get_data(as_text=True)
+        assert str(tmp_path) not in raw
+        assert "/Users/" not in raw

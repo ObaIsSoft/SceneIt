@@ -83,10 +83,19 @@ def populated_library(temp_db, unit_vectors):
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    """Flask test client with the engine isolated from real data."""
-    import app as app_module
+    """Flask test client isolated from real data.
 
-    # Keep feedback writes inside tmp_path.
+    The database is redirected too, not just the feedback file: /api/config and
+    /api/library read the library, so without this the suite would read -- and
+    POST /api/library would write to -- the developer's real sceneit.db.
+    """
+    import app as app_module
+    import database
+
+    db_file = tmp_path / "api.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_file))
+    database.init_db(str(db_file))
+
     feedback_file = tmp_path / "feedback.json"
     monkeypatch.setattr(app_module.config, "FEEDBACK_FILE", str(feedback_file))
 

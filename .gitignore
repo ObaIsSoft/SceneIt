@@ -51,3 +51,6 @@ feedback_log.json
 
 # --- Local-only scratch (never committed) ---
 .local-data/
+
+# --- Ingest-time media cache (fetched, never committed) ---
+media/

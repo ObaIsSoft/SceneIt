@@ -10,7 +10,44 @@ import sqlite3
 DB_PATH = os.getenv("DB_PATH", "sceneit.db")
 
 # Bumped whenever the schema changes in a way that needs migrating.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+def _ensure_columns(conn):
+    """Add any columns missing from an older database.
+
+    Called by both init_db() and migrate(). CREATE TABLE IF NOT EXISTS is a
+    no-op on an existing table, so a v2 database kept its original `videos`
+    definition while init_db() went on to index videos(status) -- a column that
+    did not exist yet. Schema evolution has to happen before anything depends
+    on the new shape.
+    """
+    vcols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
+    if vcols:
+        for col, decl in [
+            ("source_url", "TEXT"),
+            ("source_type", "TEXT"),
+            ("synopsis", "TEXT"),
+            ("duration_sec", "REAL"),
+            ("status", "TEXT DEFAULT 'pending'"),
+            ("error", "TEXT"),
+            ("added_at", "TEXT"),
+            ("ingested_at", "TEXT"),
+        ]:
+            if col not in vcols:
+                conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {decl}")
+        conn.execute(
+            "UPDATE videos SET status = 'ingested' WHERE status IS NULL AND id IN "
+            "(SELECT DISTINCT video_id FROM frames)"
+        )
+        conn.execute("UPDATE videos SET status = 'pending' WHERE status IS NULL")
+
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(frames)")}
+    if fcols and "vector_id" not in fcols:
+        conn.execute("ALTER TABLE frames ADD COLUMN vector_id INTEGER")
+        # Backfilled from the old positional assumption, which is exactly what
+        # can no longer be trusted -- rebuild the index rather than rely on it.
+        conn.execute("UPDATE frames SET vector_id = id - 1 WHERE vector_id IS NULL")
 
 
 def get_db_connection(db_path=None):
@@ -25,13 +62,25 @@ def init_db(db_path=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
 
+    # The library. Previously this table was populated from a hardcoded Python
+    # list in config.py on every extraction run, so the set of searchable films
+    # was a code change rather than data. Sources are now rows: added through
+    # the CLI or POST /api/library, and ingested independently.
     c.execute("""
         CREATE TABLE IF NOT EXISTS videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT UNIQUE NOT NULL,
             filename TEXT,
             year TEXT,
-            metadata_json TEXT
+            source_url TEXT,
+            source_type TEXT,          -- 'http' | 'youtube' | 'local'
+            synopsis TEXT,
+            duration_sec REAL,
+            status TEXT DEFAULT 'pending',   -- 'pending' | 'ingested' | 'failed'
+            error TEXT,
+            added_at TEXT,
+            ingested_at TEXT,
+            metadata_json TEXT         -- streaming links, TMDB payload, extras
         )
     """)
 
@@ -80,8 +129,12 @@ def init_db(db_path=None):
         )
     """)
 
+    # Bring an older table definition up to date before anything indexes it.
+    _ensure_columns(conn)
+
     # Indexes for the hot paths: filtering frames by title, and resolving a
     # vector id back to a frame after a search.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_frames_video ON frames(video_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_frames_vector ON frames(vector_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_frame_actors_frame ON frame_actors(frame_id)")
@@ -103,17 +156,10 @@ def migrate(db_path=None):
         conn.close()
         return version, False
 
-    # v1 -> v2: add the explicit vector id.
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(frames)")}
-    if cols and "vector_id" not in cols:
-        conn.execute("ALTER TABLE frames ADD COLUMN vector_id INTEGER")
-        # Backfill from the old positional assumption. This is only correct if
-        # the index was never partially rebuilt, which is exactly what we can no
-        # longer assume -- so the index should be rebuilt rather than trusted.
-        conn.execute("UPDATE frames SET vector_id = id - 1 WHERE vector_id IS NULL")
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_frames_vector_unique ON frames(vector_id)"
-        )
+    _ensure_columns(conn)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_frames_vector_unique ON frames(vector_id)"
+    )
 
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
