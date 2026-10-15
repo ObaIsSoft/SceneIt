@@ -13,9 +13,50 @@ from flask import Flask, request, jsonify, send_from_directory, render_template_
 # --- NEW AI DEPENDENCIES ---
 import torch
 from transformers import CLIPProcessor, CLIPModel, BlipProcessor, BlipForConditionalGeneration
-import faiss
+from vector_index import VectorIndex
 
 import config
+
+
+def new_index():
+    """Build an empty index for cosine similarity over unit-length vectors.
+
+    Two deliberate choices:
+
+    * Cosine similarity rather than L2 distance. Embeddings are normalised,
+      so the score is bounded in [-1, 1] and reads directly as a confidence.
+      The old L2 distances needed magic cutoffs (0.65 / 0.75) and a frontend
+      formula of `1 - d / 0.6` -- a guess layered on a guess.
+
+    * Explicit ids, so a search returns the stored `frames.vector_id` instead
+      of a row offset. See database.py for why that matters.
+
+    See vector_index.py for why this is not FAISS.
+    """
+    return VectorIndex(config.EMBEDDING_DIM)
+
+
+def _feature_tensor(features):
+    """Normalise the return type of CLIPModel.get_image_features / get_text_features.
+
+    transformers < 5 returned a plain tensor. transformers >= 5 returns a
+    BaseModelOutputWithPooling, whose `pooler_output` is the projected
+    embedding -- (1, 512) for ViT-B/32, matching config.projection_dim, while
+    `last_hidden_state` is the unprojected (1, 50, 768) tower output.
+
+    Without this, `features.norm(...)` raised AttributeError, get_embedding()
+    swallowed it and returned None, and every search answered
+    "Could not embed image" with a 500.
+    """
+    return getattr(features, "pooler_output", features)
+
+
+# Minimum cosine similarity for a result to count as a match. Expressed as
+# similarity so the number means something: 0.75 is "three-quarters aligned".
+MATCH_THRESHOLD = 0.75
+# Text fusion adds noise to the query vector, so accept slightly less.
+MATCH_THRESHOLD_MULTIMODAL = 0.68
+
 
 # --- Global State Wrapper ---
 class SearchEngine:
@@ -24,8 +65,17 @@ class SearchEngine:
         self.processor = None
         self.caption_model = None
         self.caption_processor = None
-        self.faiss_index = None
+        self.index = None
         self.caption_cache = {}
+
+        # Ranking boosts loaded from the feedback log. Initialised here rather
+        # than only in load_feedback_database(), because /api/search reads it
+        # and used to raise AttributeError on any path that skipped the loader.
+        self.feedback_db = {}
+
+        # vector_id -> frame metadata. Replaces the old positional assumption
+        # that FAISS row N corresponded to metadata_db[N]; see database.py.
+        self.vector_map = {}
         
         # In-memory cache of DB (for fast FAISS lookup)
         # We load all frames from SQL -> List to match FAISS index ID
@@ -258,30 +308,32 @@ class SearchEngine:
 
     def load_database(self):
         # 1. Load FAISS Index
-        if os.path.exists(config.FAISS_INDEX_FILE):
-             print(f"Loading Faiss index from {config.FAISS_INDEX_FILE}...")
-             self.faiss_index = faiss.read_index(config.FAISS_INDEX_FILE)
+        if os.path.exists(config.INDEX_FILE):
+             print(f"Loading vector index from {config.INDEX_FILE}...")
+             self.index = VectorIndex.load(config.INDEX_FILE)
         else:
              print("--- Database not found. Initializing empty index. ---")
-             self.faiss_index = faiss.IndexFlatL2(config.EMBEDDING_DIM)
-             
+             self.index = new_index()
+
         # 2. Load Metadata from SQLite
-        # We load *everything* into memory to ensure 1:1 mapping with FAISS index integers
-        # FAISS index 0 -> metadata_db[0]
-        # We assume 'id' order in DB matches insertion order (which matches FAISS)
+        # Frames are keyed by their explicit vector_id, so a search result maps
+        # back to a frame by lookup rather than by list position. The previous
+        # version indexed metadata_db[] by FAISS row number, which silently
+        # returned the wrong frame whenever the two drifted apart.
         try:
-            from database import get_db_connection
+            from database import get_db_connection, migrate
+            migrate()
             conn = get_db_connection()
             # Join with videos table to get 'video_title' comfortably
             rows = conn.execute('''
-                SELECT f.*, v.title as video_title 
-                FROM frames f 
-                JOIN videos v ON f.video_id = v.id 
+                SELECT f.*, v.title as video_title
+                FROM frames f
+                JOIN videos v ON f.video_id = v.id
                 ORDER BY f.id ASC
             ''').fetchall()
-            
+
             self.metadata_db = [dict(row) for row in rows]
-            
+
             # 3. Enrich with Frame Detected Actors
             # Fetch all frame-actor links
             actor_rows = conn.execute('''
@@ -304,18 +356,37 @@ class SearchEngine:
             # Inject into metadata
             for meta in self.metadata_db:
                 meta['detected_actors'] = frame_actors_map.get(meta['id'], [])
-            
+
             conn.close()
-            
-            print(f"--- Database Ready: {self.faiss_index.ntotal} vectors, {len(self.metadata_db)} metadata rows. ---")
-            
-            # Sanity check
-            if self.faiss_index.ntotal != len(self.metadata_db):
-                print(f"Start-up Warning: Vector count ({self.faiss_index.ntotal}) != Metadata count ({len(self.metadata_db)})")
-                
+
+            # Build the vector_id -> frame lookup that search results resolve
+            # through. Frames with no embedding yet are simply absent from it.
+            self.vector_map = {
+                meta['vector_id']: meta
+                for meta in self.metadata_db
+                if meta.get('vector_id') is not None
+            }
+
+            print(
+                f"--- Database Ready: {self.index.ntotal} vectors, "
+                f"{len(self.metadata_db)} frames, {len(self.vector_map)} mapped. ---"
+            )
+
+            # Integrity check. This used to print a warning and carry on, which
+            # meant a desynchronised index served wrong-but-plausible results
+            # indefinitely. A mismatch now reports how to fix it, because the
+            # only safe remedy is a rebuild.
+            if self.index.ntotal != len(self.vector_map):
+                print(
+                    f"!!! INDEX INTEGRITY ERROR: {self.index.ntotal} vectors in the "
+                    f"index but {len(self.vector_map)} frames claim one. Results would be "
+                    f"unreliable. Rebuild with: python app.py --extract"
+                )
+
         except Exception as e:
             print(f"Error loading metadata from SQL: {e}")
             self.metadata_db = []
+            self.vector_map = {}
 
     def load_feedback_database(self):
         self.feedback_db = {}
@@ -351,10 +422,10 @@ class SearchEngine:
             with torch.no_grad():
                 inputs = self.processor(text=None, images=img, return_tensors="pt", padding=True).to(config.DEVICE)
                 # Get image features
-                image_features = self.model.get_image_features(**inputs)
-                
-            # Normalize the vector (crucial for cosine similarity / L2 search)
-            image_features /= image_features.norm(dim=-1, keepdim=True)
+                image_features = _feature_tensor(self.model.get_image_features(**inputs))
+
+            # Normalize, so the inner product against the index is the cosine.
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             
             # Convert to numpy float32 for Faiss
             return image_features.cpu().numpy().astype('float32')
@@ -389,8 +460,9 @@ def download_video_if_needed(url, dest_folder, dest_filename):
     print(f"Downloading {url}...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # Disable SSL verify to avoid environment cert issues, enable timeout
-        with requests.get(url, stream=True, headers=headers, timeout=30, verify=False) as r:
+        # verify=False was here, which disabled certificate validation on every
+        # download and made the transfer trivially interceptable.
+        with requests.get(url, stream=True, headers=headers, timeout=30) as r:
             r.raise_for_status()
             with open(dest_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -401,39 +473,69 @@ def download_video_if_needed(url, dest_folder, dest_filename):
         print(f"Download failed: {e}")
         return None
 
-def crop_black_bars(image_path):
+def normalize_frame(image):
+    """Strip uniform dark borders (letterboxing) from a frame.
+
+    MUST be applied identically at ingest and at query time. It previously was
+    not: extraction stored frames untouched while /api/search cropped the
+    uploaded image, so queries and index vectors lived in different visual
+    spaces. On the Sintel trailer -- 1280x720 with baked-in 2.35:1 letterboxing
+    -- cropping removed 175 of 720 rows, and a frame matched against its own
+    stored vector at 0.9404 instead of 0.9989. That was enough for the
+    neighbouring frame to outrank the correct one, so every search lost
+    accuracy by a margin nothing was measuring.
+
+    Takes and returns an array. The old version rewrote the file in place,
+    which made the mutation invisible at the call site.
+    """
     try:
-        img = cv2.imread(image_path)
-        if img is None: return None
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if image is None:
+            return None
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, config.MIN_BRIGHTNESS, 255, cv2.THRESH_BINARY)
         coords = cv2.findNonZero(thresh)
-        if coords is None: return img
+        if coords is None:
+            return image
         x, y, w, h = cv2.boundingRect(coords)
-        cropped = img[y:y+h, x:x+w]
-        cv2.imwrite(image_path, cropped)
-        return image_path
-    except:
-        return image_path
+        if w < 16 or h < 16:  # refuse to crop away the whole frame
+            return image
+        return image[y:y + h, x:x + w]
+    except Exception as e:
+        print(f"normalize_frame failed, using the frame as-is: {e}")
+        return image
 
 # --- Extraction Logic (V2) ---
 # --- Extraction Logic (V2) ---
-def run_extraction():
+def run_extraction(videos=None):
     # Reset everything
     # We will build the index at the END, after we know the total count
     all_vectors = []
     engine.metadata_db = [] # Clear memory
+    # Defaults to the whole configured library; --only / --limit narrow it so a
+    # working index can be built in minutes instead of re-ingesting everything.
+    if videos is None:
+        videos = config.VIDEOS_TO_PROCESS
+    if not videos:
+        print("No videos selected for extraction.")
+        return
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     
-    # Force fresh DB schema
-    if os.path.exists("sceneit.db"): os.remove("sceneit.db")
-    from database import init_db, get_db_connection
+    # Force fresh DB schema.
+    # Uses database.DB_PATH rather than a literal "sceneit.db": in production
+    # DB_PATH points at a mounted volume (/data/sceneit.db on Fly), so the old
+    # hardcoded path deleted nothing, init_db() ran CREATE TABLE IF NOT EXISTS
+    # over the live database, and extraction appended to it -- duplicating
+    # videos and desynchronising the index.
+    from database import DB_PATH, get_db_connection, init_db
+    if os.path.exists(DB_PATH):
+        print(f"Removing existing database at {DB_PATH}")
+        os.remove(DB_PATH)
     init_db()
     conn = get_db_connection()
 
     # Populate Videos Table first
     video_id_map = {}
-    for vid in config.VIDEOS_TO_PROCESS:
+    for vid in videos:
         metadata = {
             "synopsis": vid.get("synopsis"),
             "actors": vid.get("actors"),
@@ -449,7 +551,7 @@ def run_extraction():
     # Ensure AI model is loaded
     if engine.model is None: engine.load_ai_models()
     
-    for video_info in config.VIDEOS_TO_PROCESS:
+    for video_info in videos:
         title = video_info["title"]
         url = video_info["url"]
         filename = video_info["filename"]
@@ -516,6 +618,9 @@ def run_extraction():
             safe_ts = f"{int(current_sec * 1000)}"
             filename_jpg = f"{title}_{safe_ts}.jpg"
             full_path = os.path.join(config.OUTPUT_DIR, filename_jpg)
+            # Same normalisation the query gets. Stored and embedded alike, so
+            # the saved thumbnail is exactly what produced the vector.
+            frame = normalize_frame(frame)
             cv2.imwrite(full_path, frame)
             
             # 3. Generate Vector Embedding
@@ -527,14 +632,17 @@ def run_extraction():
                 found_actors = face_det.scan_frame(frame)
 
             if vector is not None:
-                # 5. Collect for later indexing
+                # 5. Collect for later indexing, recording the id this vector
+                # will be stored under. Written to the frame row in the same
+                # transaction, so the mapping is persisted rather than inferred.
+                vector_id = len(all_vectors)
                 all_vectors.append(vector)
-                
+
                 # Insert into DB (frames)
                 cur = conn.execute('''
-                    INSERT INTO frames (video_id, filename, timestamp, time_sec)
-                    VALUES (?, ?, ?, ?)
-                ''', (video_db_id, filename_jpg, timestamp_str, current_sec))
+                    INSERT INTO frames (video_id, filename, timestamp, time_sec, vector_id)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (video_db_id, filename_jpg, timestamp_str, current_sec, vector_id))
                 frame_id = cur.lastrowid
                 
                 # Insert into DB (frame_actors)
@@ -560,32 +668,41 @@ def run_extraction():
         print("No vectors extracted. Exiting.")
         return
 
-    # Convert list to huge numpy matrix
+    # Convert list to one matrix
     print(f"\n--- Building Index for {total_vectors} vectors ---")
     vector_matrix = np.vstack(all_vectors)
-    
-    # Threshold for switching to IVF (Clustering)
-    IVF_THRESHOLD = 50000 
-    
-    if total_vectors < IVF_THRESHOLD:
-        print("Dataset is small. Using Exact Search (IndexFlatL2).")
-        engine.faiss_index = faiss.IndexFlatL2(config.EMBEDDING_DIM)
-        engine.faiss_index.add(vector_matrix)
-    else:
-        print(f"Dataset is large (> {IVF_THRESHOLD}). Using Clustering Search (IndexIVFFlat).")
-        # Number of centroids (clusters)
-        nlist = int(np.sqrt(total_vectors))
-        quantizer = faiss.IndexFlatL2(config.EMBEDDING_DIM)
-        engine.faiss_index = faiss.IndexIVFFlat(quantizer, config.EMBEDDING_DIM, nlist, faiss.METRIC_L2)
-        
-        print(f"Training index with {nlist} clusters...")
-        engine.faiss_index.train(vector_matrix)
-        print("Training complete. Adding vectors...")
-        engine.faiss_index.add(vector_matrix)
+
+    # Exact cosine search with explicit ids. The ids are the same values written
+    # to frames.vector_id above, in the same order, so index and database agree
+    # by construction.
+    #
+    # The old IVF branch above 50k vectors is gone: it was untested at that
+    # scale, needed an nprobe that nothing tuned, and exact search over a few
+    # thousand 512-d vectors is a sub-millisecond matrix product. Approximate
+    # search can come back when the corpus actually warrants it.
+    engine.index = new_index()
+    vector_ids = np.arange(total_vectors, dtype='int64')
+    engine.index.add_with_ids(vector_matrix, vector_ids)
+
+    # Verify before writing anything to disk.
+    assert engine.index.ntotal == total_vectors, (
+        f"index holds {engine.index.ntotal} vectors, expected {total_vectors}"
+    )
+    db_mapped = conn.execute(
+        "SELECT COUNT(*) FROM frames WHERE vector_id IS NOT NULL"
+    ).fetchone()[0]
+    if db_mapped != total_vectors:
+        print(
+            f"!!! ABORT: {db_mapped} frames carry a vector_id but {total_vectors} vectors "
+            f"were built. Not writing a desynchronised index."
+        )
+        conn.close()
+        return
+    print(f"Verified: {total_vectors} vectors <-> {db_mapped} frame rows.")
 
     # Save Index & Metadata
-    print(f"\nSaving Faiss index to {config.FAISS_INDEX_FILE}...")
-    faiss.write_index(engine.faiss_index, config.FAISS_INDEX_FILE)
+    print(f"\nSaving vector index to {config.INDEX_FILE}...")
+    engine.index.save(config.INDEX_FILE)
     
     print(f"Saving metadata to {config.METADATA_JSON} (No longer authoritative, DB is used)...")
     # Optional: Keep writing JSON for debugging? Or delete?
@@ -658,8 +775,19 @@ def get_config():
 @app.route('/api/all_frames', methods=['GET'])
 def get_all_frames():
     video_title = request.args.get('video_title')
-    page = int(request.args.get('page', 1))
-    limit = int(request.args.get('limit', 20))
+
+    # Bare int() here raised ValueError -> 500 on any non-numeric input, so
+    # ?page=abc was an unhandled server error. Clamp rather than reject: these
+    # are pagination hints, not meaningful user input.
+    def _positive_int(name, default, maximum):
+        raw = request.args.get(name, default)
+        try:
+            return max(1, min(int(raw), maximum))
+        except (TypeError, ValueError):
+            return default
+
+    page = _positive_int('page', 1, 1_000_000)
+    limit = _positive_int('limit', 20, 100)
     
     # If no title provided, return randomly from all? Or just empty?
     # Let's support "all" if title is empty or "all"
@@ -695,11 +823,10 @@ def search():
         temp_path = temp.name
         
     try:
-        # 2. Crop
-        crop_black_bars(temp_path)
-        
+        # 2. Normalise exactly as ingest does, so query and index match.
+        query_img = normalize_frame(cv2.imread(temp_path))
+
         # 3. Generate Embedding
-        query_img = cv2.imread(temp_path)
         query_vec = engine.get_embedding(query_img)
         
         if query_vec is None:
@@ -713,10 +840,10 @@ def search():
                 # Get text features
                 text_inputs = engine.processor(text=[text_query], return_tensors="pt", padding=True).to(config.DEVICE)
                 with torch.no_grad():
-                    text_features = engine.model.get_text_features(**text_inputs)
-                
+                    text_features = _feature_tensor(engine.model.get_text_features(**text_inputs))
+
                 # Normalize text features
-                text_features /= text_features.norm(dim=-1, keepdim=True)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
                 text_vec = text_features.cpu().numpy().astype('float32')
                 
                 # Weighted Combination (Image is still primary)
@@ -753,64 +880,68 @@ def search():
                 print(f"Actor filter error: {e}")
                 valid_filenames = set()
 
-        # 4. Search Faiss
-        # We search MORE results if we have a filter, then filter them down
-        search_k = 50 if actor_filter else 12 
-        
-        if isinstance(engine.faiss_index, faiss.IndexIVFFlat):
-            engine.faiss_index.nprobe = 10 
-            
-        distances, indices = engine.faiss_index.search(query_vec, search_k)
-        
-        # Check for No Match
-        # Heuristic: If the BEST match has a distance > 0.5 (arbitrary threshold for L2 normalized),
-        # we consider it a failure. Note: for L2 on normalized vectors, dist = 2*(1-cos_sim).
-        # cos_sim = 1 -> dist = 0. cos_sim = 0.8 -> dist = 0.4. 
-        # So dist > 0.6 means similarity < 0.7.
-        
-        best_dist = distances[0][0]
-        # Relax threshold slightly for multimodal (fusion noise)
-        threshold = 0.75 if text_query else 0.65 
-        
-        if best_dist > threshold: 
-             return jsonify({
+        # 4. Search the index.
+        # Over-fetch when filtering by actor, since most hits get discarded.
+        search_k = 50 if actor_filter else 12
+        search_k = min(search_k, max(engine.index.ntotal, 1))
+
+        # Inner product over unit vectors: higher is better, and the score is
+        # cosine similarity in [-1, 1].
+        scores, ids = engine.index.search(query_vec, search_k)
+
+        threshold = MATCH_THRESHOLD_MULTIMODAL if text_query else MATCH_THRESHOLD
+        best_score = float(scores[0][0]) if len(scores[0]) else -1.0
+
+        if best_score < threshold:
+            return jsonify({
                 "match_type": "no_matches",
                 "results": [],
+                "best_similarity": round(best_score, 4),
+                "threshold": threshold,
                 "query_hash": "vector_search"
             })
-            
+
         results = []
-        for i in range(search_k):
-            idx = indices[0][i]
-            dist = distances[0][i]
-            
-            if idx != -1 and idx < len(engine.metadata_db):
-                meta = engine.metadata_db[idx]
-                
-                # Apply Actor Filter
-                if actor_filter and meta['filename'] not in valid_filenames:
-                    continue
-                
-                # RE-RANKING LOGIC - Boost previously selected results
-                feedback_count = engine.feedback_db.get(meta['filename'], 0)
-                adjusted_dist = float(dist) - (feedback_count * 0.08)  # Increased boost
-                
-                results.append({
-                    "filename": meta['filename'],
-                    "timestamp": meta['timestamp'],
-                    "time_sec": meta['time_sec'],
-                    "video_title": meta['video_title'],
-                    "distance": adjusted_dist,
-                    "is_boosted": feedback_count > 0,
-                    "feedback_note": f"{feedback_count} votes" if feedback_count > 0 else "",
-                    "detected_actors": meta.get('detected_actors', [])
-                })
-                
-                if len(results) >= 12: break # Limit to 12 final results
-        
-        # Sort by adjusted distance
-        results.sort(key=lambda x: x['distance'])
-        
+        for score, vector_id in zip(scores[0], ids[0]):
+            # faiss pads short result sets with -1.
+            if vector_id == -1:
+                continue
+
+            # Resolve by explicit id. A miss means the index references a frame
+            # the database does not have, which is a real integrity problem --
+            # so skip it rather than silently serving a neighbouring frame.
+            meta = engine.vector_map.get(int(vector_id))
+            if meta is None:
+                print(f"[Search] Orphaned vector_id {int(vector_id)} not in database; skipping")
+                continue
+
+            if actor_filter and meta['filename'] not in valid_filenames:
+                continue
+
+            # Re-ranking: nudge previously chosen frames up. Additive on
+            # similarity, so a boost raises the score rather than lowering a
+            # distance, and the result stays inside the comparable range.
+            feedback_count = engine.feedback_db.get(meta['filename'], 0)
+            boosted = min(1.0, float(score) + feedback_count * 0.02)
+
+            results.append({
+                "filename": meta['filename'],
+                "timestamp": meta['timestamp'],
+                "time_sec": meta['time_sec'],
+                "video_title": meta['video_title'],
+                "similarity": round(float(score), 4),
+                "score": round(boosted, 4),
+                "is_boosted": feedback_count > 0,
+                "feedback_note": f"{feedback_count} votes" if feedback_count > 0 else "",
+                "detected_actors": meta.get('detected_actors', [])
+            })
+
+            if len(results) >= 12:
+                break
+
+        # Best match first.
+        results.sort(key=lambda x: x['score'], reverse=True)
+
         return jsonify({
             "match_type": "image_grid",
             "results": results,
@@ -850,13 +981,16 @@ def feedback():
 def explore():
     # 1. History (Recent Selections from Feedback)
     history = []
+    # Declared out here, not inside the branch below. It is read unconditionally
+    # by the random-picks section, so on a fresh install with no feedback log
+    # this endpoint raised NameError and returned a 500.
+    seen = set()
     if os.path.exists(config.FEEDBACK_FILE):
         try:
             with open(config.FEEDBACK_FILE, 'r') as f:
                 log = json.load(f)
                 # Filter for 'add' actions and get unique latest entries
                 # Reverse to get newest first
-                seen = set()
                 for entry in reversed(log):
                     fname = entry.get('selected_filename')
                     action = entry.get('action', 'add')
@@ -865,8 +999,7 @@ def explore():
                         meta = next((m for m in engine.metadata_db if m['filename'] == fname), None)
                         if meta:
                             history.append({
-                                **meta, 
-                                "distance": 0, # Dummy for frontend
+                                **meta,
                                 "feedback_note": "Recently Found"
                             })
                             seen.add(fname)
@@ -884,10 +1017,7 @@ def explore():
             meta = engine.metadata_db[idx]
             # Don't duplicate history
             if meta['filename'] not in seen:
-                 random_clips.append({
-                    **meta,
-                    "distance": 0
-                })
+                 random_clips.append(dict(meta))
 
     return jsonify({
         "history": history,
@@ -896,19 +1026,81 @@ def explore():
 
 # --- Main ---
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--extract', action='store_true')
+    parser = argparse.ArgumentParser(description="SceneIt server and ingest.")
+    parser.add_argument('--extract', action='store_true',
+                        help="rebuild the index from the configured library")
+    parser.add_argument('--only', action='append', metavar='TITLE', default=None,
+                        help="extract only this title (repeatable, substring match)")
+    parser.add_argument('--limit', type=int, default=None, metavar='N',
+                        help="extract at most N videos")
+    parser.add_argument('--port', type=int, default=int(os.getenv('PORT', 5002)))
+    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--list', action='store_true',
+                        help="list the configured library and exit")
+    parser.add_argument('--video', metavar='URL_OR_PATH', default=None,
+                        help="extract one arbitrary source, ignoring the configured library")
+    parser.add_argument('--title', default=None, help="title for --video")
+    parser.add_argument('--year', default=None, help="year for --video")
     args = parser.parse_args()
-    
+
+    if args.list:
+        for i, v in enumerate(config.VIDEOS_TO_PROCESS):
+            src = 'youtube' if 'youtube.com' in (v.get('url') or '') else ('local' if not v.get('url') else 'http')
+            print(f"  [{i:2}] {v['title']:<46} {src:<8} {v.get('filename')}")
+        raise SystemExit(0)
+
     if args.extract:
-        run_extraction()
+        selected = config.VIDEOS_TO_PROCESS
+
+        # An explicit source bypasses the configured library entirely.
+        if args.video:
+            import re as _re
+            from urllib.parse import urlparse as _urlparse
+            is_url = args.video.startswith(('http://', 'https://'))
+            basename = os.path.basename(_urlparse(args.video).path) or 'video.mp4'
+            title = args.title or _re.sub(r'\.[^.]+$', '', basename) or 'Untitled'
+            if not is_url and not os.path.exists(args.video):
+                print(f"No such file: {args.video}")
+                raise SystemExit(1)
+            selected = [{
+                "title": title,
+                "url": args.video if is_url else "",
+                "filename": basename if is_url else os.path.basename(args.video),
+                "year": args.year or "",
+                "synopsis": "",
+                "actors": [],
+                "streaming_on": [],
+            }]
+            # A local path is used in place, not re-downloaded.
+            if not is_url:
+                os.makedirs(config.TEMP_VIDEO_DIR, exist_ok=True)
+                dest = os.path.join(config.TEMP_VIDEO_DIR, selected[0]["filename"])
+                if os.path.abspath(dest) != os.path.abspath(args.video):
+                    import shutil as _shutil
+                    _shutil.copy2(args.video, dest)
+        if args.only:
+            wanted = [w.lower() for w in args.only]
+            selected = [v for v in selected
+                        if any(w in v['title'].lower() for w in wanted)]
+            if not selected:
+                print(f"No configured title matches {args.only}. Use --list to see them.")
+                raise SystemExit(1)
+        if args.limit is not None:
+            selected = selected[:args.limit]
+        print(f"--- Extracting {len(selected)} of {len(config.VIDEOS_TO_PROCESS)} videos ---")
+        for v in selected:
+            print(f"      {v['title']}")
+        run_extraction(selected)
     else:
-        if not os.path.exists(config.FAISS_INDEX_FILE):
-            print("--- ERROR: Database not found. Run --extract first. ---")
-        else:
-            # Load models & DB on startup
-            engine.load_ai_models()
-            engine.load_database()
-            engine.load_feedback_database()
-            print("--- Server Started on Port 5002 ---")
-            app.run(host='0.0.0.0', port=5002, debug=False)
+        if not os.path.exists(config.INDEX_FILE):
+            print(f"--- ERROR: no index at {config.INDEX_FILE}. Build one first:")
+            print("        python app.py --extract --only ForBiggerBlazes   (quick)")
+            print("        python app.py --extract                          (full library)")
+            raise SystemExit(1)
+
+        # Load models & DB on startup
+        engine.load_ai_models()
+        engine.load_database()
+        engine.load_feedback_database()
+        print(f"--- Server listening on http://{args.host}:{args.port} ---")
+        app.run(host=args.host, port=args.port, debug=False)

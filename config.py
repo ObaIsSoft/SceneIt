@@ -7,7 +7,8 @@ load_dotenv() # Load variables from .env
 # --- Configuration ---
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output_frames")
 METADATA_JSON = os.path.join(OUTPUT_DIR, "metadata.json")
-FAISS_INDEX_FILE = os.path.join(OUTPUT_DIR, "frames.index")
+# Vector index, saved as a compressed numpy archive. See vector_index.py.
+INDEX_FILE = os.path.join(OUTPUT_DIR, "frames.npz")
 FEEDBACK_FILE = "feedback_log.json"
 TEMP_VIDEO_DIR = "temp_videos"
 

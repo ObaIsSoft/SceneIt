@@ -33,8 +33,11 @@ const els = {
     resultsContainer: document.getElementById('results-container'),
     resultsGrid: document.getElementById('results-grid'),
     statusMsg: document.getElementById('status-msg'),
-    browseArea: document.getElementById('browse-toggle-area'),
-    browseBtn: document.getElementById('browse-btn'),
+    // NOTE: 'browse-toggle-area' and 'browse-btn' used to be looked up here and
+    // do not exist in index.html. Both resolved to null, so the browse listener
+    // was never attached and the header's Explore Library button -- which
+    // proxied through els.browseBtn.click() -- threw on null. The entire
+    // library view was unreachable. openBrowse() below replaces that proxy.
     browseSection: document.getElementById('browse-section'),
     videoTabs: document.getElementById('video-tabs'),
     browseGrid: document.getElementById('browse-grid'),
@@ -47,9 +50,7 @@ const els = {
     modalClose: document.getElementById('modal-close'),
     modalTitle: document.getElementById('modal-title'),
     modalYear: document.getElementById('modal-year'),
-    modalActors: document.getElementById('modal-actors'),
     modalStreaming: document.getElementById('modal-streaming'),
-    videoTimeOverlay: document.getElementById('video-time-overlay'),
     clipCurrentTime: document.getElementById('clip-current-time'),
     clipTotalTime: document.getElementById('clip-total-time'),
     noMatchesMsg: document.getElementById('no-matches-msg'),
@@ -423,7 +424,7 @@ if (els.form) {
 if (els.exploreBtn) {
     els.exploreBtn.addEventListener('click', () => {
         els.noMatchesMsg.classList.add('hidden');
-        els.browseBtn.click(); // Trigger browse mode
+        openBrowse();
     });
 }
 
@@ -480,21 +481,25 @@ async function processVideoSearch(file) {
         // Structure from backend: { results: [ {filename, score, ...}, ... ] }
 
         // Aggregation Logic (Group by Video Title)
-        let aggregation = {}; // video_title -> { count: 0, bestObj: null, minDistance: 999 }
+        // video_title -> { count, bestObj, bestScore }
+        // Scores are cosine similarities now, so the best frame for a title is
+        // the one with the HIGHEST score, not the lowest distance.
+        let aggregation = {};
 
         results.forEach(res => {
             if (res && res.results) {
                 res.results.forEach(item => {
                     const title = item.video_title;
+                    const itemScore = typeof item.score === 'number' ? item.score : (item.similarity || 0);
+
                     if (!aggregation[title]) {
-                        aggregation[title] = { count: 0, bestObj: item, minDistance: item.distance };
+                        aggregation[title] = { count: 0, bestObj: item, bestScore: itemScore };
                     }
 
                     aggregation[title].count += 1;
 
-                    // Keep the best frame (lowest distance) for this video
-                    if (item.distance < aggregation[title].minDistance) {
-                        aggregation[title].minDistance = item.distance;
+                    if (itemScore > aggregation[title].bestScore) {
+                        aggregation[title].bestScore = itemScore;
                         aggregation[title].bestObj = item;
                     }
                 });
@@ -506,7 +511,7 @@ async function processVideoSearch(file) {
         // 2. Min Distance (Quality)
         let sortedCandidates = Object.values(aggregation).sort((a, b) => {
             if (b.count !== a.count) return b.count - a.count; // Prioritize mostly matched
-            return a.minDistance - b.minDistance; // Then best match quality
+            return b.bestScore - a.bestScore; // Then best match quality (higher is better)
         });
 
         // Extract just the best frame object for each video
@@ -629,16 +634,35 @@ function createCard(data, isBrowseMode) {
     const el = document.createElement('div');
     el.className = `result-card glass rounded-2xl overflow-hidden transform translate-y-4 transition-all duration-300 w-full min-w-[260px]`;
 
-    // Determine Match Quality Color & Badge
+    // Match quality, derived from cosine similarity in [0, 1] where higher is
+    // better. The previous version read `data.distance` (an L2 distance, lower
+    // is better) and converted it to a percentage with `1 - d / 0.6` -- a
+    // hand-picked constant that made the displayed confidence arbitrary. The
+    // backend now returns a similarity directly, so the percentage is the
+    // score itself.
+    const score = typeof data.score === 'number' ? data.score
+                : typeof data.similarity === 'number' ? data.similarity
+                : null;
+    const pct = score === null ? null : Math.round(Math.max(0, Math.min(1, score)) * 100);
+
     let badgeClass = "bg-gray-600";
     let badgeText = "Match";
+    let toneText = "text-gray-400";
+    let toneBar = "bg-gray-600";
 
-    if (!isBrowseMode) {
-        const d = data.distance;
-        if (d < 0.2) { badgeClass = "bg-gradient-to-r from-emerald-500 to-teal-500"; badgeText = "Perfect"; }
-        else if (d < 0.3) { badgeClass = "bg-gradient-to-r from-green-500 to-emerald-500"; badgeText = "Excellent"; }
-        else if (d < 0.4) { badgeClass = "bg-gradient-to-r from-yellow-500 to-orange-500"; badgeText = "Good"; }
-        else { badgeClass = "bg-gray-600"; badgeText = "Possible"; }
+    if (!isBrowseMode && score !== null) {
+        if (score >= 0.95) {
+            badgeClass = "bg-gradient-to-r from-emerald-500 to-teal-500"; badgeText = "Perfect";
+            toneText = "text-emerald-400"; toneBar = "bg-gradient-to-r from-emerald-500 to-teal-400";
+        } else if (score >= 0.90) {
+            badgeClass = "bg-gradient-to-r from-green-500 to-emerald-500"; badgeText = "Excellent";
+            toneText = "text-green-400"; toneBar = "bg-gradient-to-r from-green-500 to-emerald-400";
+        } else if (score >= 0.82) {
+            badgeClass = "bg-gradient-to-r from-yellow-500 to-orange-500"; badgeText = "Good";
+            toneText = "text-yellow-400"; toneBar = "bg-gradient-to-r from-yellow-500 to-orange-400";
+        } else {
+            badgeClass = "bg-gray-600"; badgeText = "Possible";
+        }
     }
 
     // Find Video Config for specific URL
@@ -704,15 +728,15 @@ function createCard(data, isBrowseMode) {
                 <span>⏱ ${formatTime(data.time_sec)}</span>
             </p>
             ${!isBrowseMode ? `
-                <!-- Confidence Score Bar -->
+                <!-- Confidence, straight from the cosine similarity -->
                 <div class="space-y-1">
                     <div class="flex items-center justify-between text-xs">
                         <span class="text-gray-500">Match Confidence</span>
-                        <span class="font-semibold ${data.distance < 0.2 ? 'text-emerald-400' : data.distance < 0.3 ? 'text-green-400' : data.distance < 0.4 ? 'text-yellow-400' : 'text-gray-400'}">${Math.round(Math.max(0, Math.min(100, (1 - (data.distance / 0.6)) * 100)))}%</span>
+                        <span class="font-semibold ${toneText}">${pct === null ? '--' : pct + '%'}</span>
                     </div>
                     <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                        <div class="h-full rounded-full transition-all duration-500 ${data.distance < 0.2 ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : data.distance < 0.3 ? 'bg-gradient-to-r from-green-500 to-emerald-400' : data.distance < 0.4 ? 'bg-gradient-to-r from-yellow-500 to-orange-400' : 'bg-gray-600'}" 
-                             style="width: ${Math.max(10, Math.min(100, (1 - (data.distance / 0.6)) * 100))}%"></div>
+                        <div class="h-full rounded-full transition-all duration-500 ${toneBar}"
+                             style="width: ${pct === null ? 0 : Math.max(4, pct)}%"></div>
                     </div>
                 </div>
                 ${data.is_boosted ? '<div class="text-xs text-purple-400 flex items-center gap-1"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path></svg> Previously Selected</div>' : ''}
@@ -897,16 +921,14 @@ function showNewSearchButton() {
     });
 }
 // --- Browse Logic ---
-if (els.browseBtn) {
-    els.browseBtn.addEventListener('click', () => {
-        els.browseSection.classList.remove('hidden');
-        els.browseArea.classList.add('hidden'); // hide toggle button
-
-        // Instead of immediate movie tabs, show Dashboard
-        renderTabs(); // Make tabs available for manual filtering
-        loadExploreDashboard();
-    });
+function openBrowse() {
+    if (!els.browseSection) return;
+    els.browseSection.classList.remove('hidden');
+    renderTabs();            // tabs for manual filtering
+    loadExploreDashboard();  // history + random picks
+    els.browseSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+window.openBrowse = openBrowse;
 
 // Infinite Scroll Listeners (Only active when NOT in Dashboard mode, or customize)
 window.addEventListener('scroll', () => {
@@ -966,7 +988,6 @@ async function loadExploreDashboard() {
 if (els.closeBrowse) {
     els.closeBrowse.addEventListener('click', () => {
         els.browseSection.classList.add('hidden');
-        els.browseArea.classList.remove('hidden');
     });
 }
 
@@ -1017,8 +1038,8 @@ async function loadBrowseData(title, reset = false) {
         }
 
         data.frames.forEach((f, idx) => {
-            // Add dummy distance for browse mode
-            const card = createCard({ ...f, distance: 0 }, true);
+            // Browse mode shows no confidence, so no score is passed.
+            const card = createCard(f, true);
             card.style.opacity = 1;
             card.style.transform = 'none';
             els.browseGrid.appendChild(card);
@@ -1301,7 +1322,6 @@ const closeModal = () => {
         els.modal.classList.add('hidden');
         els.modalVideo.pause();
         els.modalVideo.src = ""; // Stop buffering
-        els.videoTimeOverlay.classList.add('hidden'); // Hide time overlay
 
         // Reset Immersive Background
         if (els.modalContainer) {

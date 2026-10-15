@@ -23,13 +23,15 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# Search backend as it stands today (torch + transformers + faiss).
+# Search backend as it stands today (torch + transformers).
 # Phase 3 replaces this with `onnx` below; both are kept side by side so the
 # int8 ONNX descriptors can be validated against this fp32 baseline.
+# NOTE: faiss-cpu was removed, not merely unused. It bundles its own libomp,
+# which aborts the process on macOS arm64 once torch has been imported
+# ("OMP: Error #15"). See the module docstring in vector_index.py.
 torch-baseline = [
     "torch>=2.2",
     "transformers>=4.38",
-    "faiss-cpu>=1.8",
 ]
 
 # Phase 3 target: one inference engine, no torch at runtime.
